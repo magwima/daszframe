@@ -43,15 +43,35 @@
     const c = document.createElement('canvas');
     c.width = Math.round(W * s); c.height = Math.round(H * s);
     c.getContext('2d').drawImage(imgEl, 0, 0, c.width, c.height);
-    let res = [];
+    // Run the detector at three input sizes and merge overlapping boxes,
+    // keeping each face's best score. Faces are then chosen by confidence
+    // weighted by size, so a large but doubtful hit (an arm, a pattern)
+    // can't beat a clear face.
+    const iou = (a, b) => {
+      const x0 = Math.max(a.x, b.x), y0 = Math.max(a.y, b.y), x1 = Math.min(a.x + a.width, b.x + b.width), y1 = Math.min(a.y + a.height, b.y + b.height);
+      const i = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+      return i / (a.width * a.height + b.width * b.height - i || 1);
+    };
+    const found = [];
     for (const inputSize of [512, 320, 608]) {
-      res = await fa.detectAllFaces(c, new fa.TinyFaceDetectorOptions({ inputSize, scoreThreshold: 0.35 })).withFaceLandmarks();
-      if (res.length) break;
+      const r = await fa.detectAllFaces(c, new fa.TinyFaceDetectorOptions({ inputSize, scoreThreshold: 0.35 }));
+      for (const d of r) {
+        const m = found.find(f => iou(f.box, d.box) > 0.25);
+        if (!m) found.push({ box: d.box, score: d.score, inputSize });
+        else if (d.score > m.score) Object.assign(m, { box: d.box, score: d.score, inputSize });
+      }
     }
-    if (!res.length) return null;
-    const best = res.reduce((a, b) => (b.detection.box.area > a.detection.box.area ? b : a));
-    // Only count other faces that are a real size (ignores tiny false hits).
-    const faces = res.filter(r => r.detection.box.area >= best.detection.box.area * 0.2 && r.detection.score >= 0.5).length || 1;
+    if (!found.length) return null;
+    const strong = found.filter(f => f.score >= 0.5);
+    const pool = strong.length ? strong : found;
+    const rank = (f) => f.score * Math.sqrt(f.box.width * f.box.height);
+    const pick = pool.reduce((a, b) => (rank(b) > rank(a) ? b : a));
+    const withLm = await fa.detectAllFaces(c, new fa.TinyFaceDetectorOptions({ inputSize: pick.inputSize, scoreThreshold: 0.3 })).withFaceLandmarks();
+    const best = withLm.reduce((a, b) => (iou(b.detection.box, pick.box) > iou(a.detection.box, pick.box) ? b : a), withLm[0]);
+    if (!best || iou(best.detection.box, pick.box) < 0.3) return null;
+    // Only count other faces that are clear and a real size.
+    const area = pick.box.width * pick.box.height;
+    const faces = strong.filter(f => f.box.width * f.box.height >= area * 0.2).length || 1;
     return { faces, points: best.landmarks.positions.map(p => ({ x: p.x / s, y: p.y / s })) };
   }
 

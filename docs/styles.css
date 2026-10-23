@@ -224,3 +224,12 @@ canvas.curve-c{display:block;border-radius:3px;cursor:crosshair}
 .band{width:20px;height:20px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;position:relative;box-shadow:inset 0 0 0 1px rgba(0,0,0,.3)}
 .band.on{border-color:var(--text);transform:scale(1.12)}
 .band.edited::after{content:'';position:absolute;right:-3px;top:-3px;width:6px;height:6px;border-radius:50%;background:var(--acc);border:1px solid #0a0a0a}
+.checker{background-color:#fff;background-image:linear-gradient(45deg,#ccc 25%,transparent 25%),linear-gradient(-45deg,#ccc 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#ccc 75%),linear-gradient(-45deg,transparent 75%,#ccc 75%);background-size:12px 12px;background-position:0 0,0 6px,6px -6px,-6px 0}
+.chip-row{display:flex;gap:4px;flex-wrap:wrap}
+.chip-row .chip{flex:1;text-align:center;justify-content:center}
+.seg-status{display:flex;align-items:center;font-size:11px;color:var(--muted);margin:0 0 8px;min-height:22px}
+.seg-status.ready{color:var(--acc)}.seg-status.failed{color:var(--red)}
+.swatch{width:20px;height:20px;border-radius:3px;cursor:pointer;border:1px solid var(--b2)}
+.swatch-input{width:22px;height:22px;border:none;background:none;cursor:pointer;padding:0}
+.target-pill{margin:8px 12px 0;padding:5px 8px;border:1px solid rgba(232,213,163,.35);background:var(--acc3);color:var(--acc);border-radius:3px;font-size:10px;font-family:var(--fm);cursor:pointer}
+.tabs .tab{padding-left:5px;padding-right:5px}

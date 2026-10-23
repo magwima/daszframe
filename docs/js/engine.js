@@ -87,10 +87,17 @@
     const out = canvas(c.width, c.height), x = out.getContext('2d');
     if (radius <= 0.3) { x.drawImage(c, 0, 0); return out; }
     if (canvasFilterSupported()) { x.filter = `blur(${radius}px)`; x.drawImage(c, 0, 0); x.filter = 'none'; return out; }
-    const id = c.getContext('2d').getImageData(0, 0, c.width, c.height);
-    const b = jsBlur(id.data, c.width, c.height, radius);
-    const od = x.createImageData(c.width, c.height);
-    for (let i = 0; i < b.length; i++) od.data[i] = b[i];
+    // JS fallback: blur premultiplied colour (like the browser does) so
+    // transparent areas don't darken or haze the edges.
+    const id = c.getContext('2d').getImageData(0, 0, c.width, c.height), sd = id.data;
+    const pm = new Uint8ClampedArray(sd.length);
+    for (let i = 0; i < sd.length; i += 4) { const a = sd[i + 3] / 255; pm[i] = sd[i] * a; pm[i + 1] = sd[i + 1] * a; pm[i + 2] = sd[i + 2] * a; pm[i + 3] = sd[i + 3]; }
+    const b = jsBlur(pm, c.width, c.height, radius);
+    const od = x.createImageData(c.width, c.height), d = od.data;
+    for (let i = 0; i < b.length; i += 4) {
+      const a = b[i + 3], k = a > 0.5 ? 255 / a : 0;
+      d[i] = b[i] * k; d[i + 1] = b[i + 1] * k; d[i + 2] = b[i + 2] * k; d[i + 3] = a;
+    }
     x.putImageData(od, 0, 0);
     return out;
   }
@@ -403,34 +410,54 @@
     if (ia > ba) { const nw = sh * ba; sx += (sw - nw) / 2; sw = nw; } else { const nh = sw / ba; sy += (sh - nh) / 2; sh = nh; }
     ctx.drawImage(src, sx, sy, sw, sh, x, y, w, h);
   }
-  // Retouched source photo for a layer (portrait.js), or null.
+  // The photo a layer draws from: the original, then portrait retouch
+  // (portrait.js), then background tools (background.js + seg.js).
+  // Returns null when the plain original should be used.
   function portraitSource(l, o) {
     const P = global.DZPortrait, g = l.grade || {};
     if (!P || !l.imgEl || !l.face || !l.face.points || !P.active(g.portrait)) return null;
     return P.get(l.imgEl, l.face.points, g.portrait, o.hq ? 6000 : 2400);
   }
-  function drawContent(lc, l, o) {
+  function layerSource(l, o) {
+    const ps = portraitSource(l, o), g = l.grade || {};
+    const B = global.DZBg, S = global.DZSeg, showMask = o.showMaskFor && o.showMaskFor === l.id;
+    if (B && S && l.imgEl && (B.active(g.bg) || showMask)) {
+      const mask = S.get(l.imgEl, o.onPending);
+      if (mask) {
+        const r = B.process(ps || l.imgEl, mask, g.bg, o.hq ? 6000 : 2400, { showMask, onPending: o.onPending });
+        if (r) return r;
+      }
+    }
+    return ps;
+  }
+  // Draw a layer's content. `src` replaces the photo (used to draw masks
+  // through exactly the same placement as the photo itself).
+  function drawContent(lc, l, o, src) {
     const { scale, CW, CH, onPending } = o, x = lc.getContext('2d'), g = l.grade || {};
+    const masking = !!src;
     x.setTransform(scale, 0, 0, scale, 0, 0);
     if (l.type === 'photo' && l.imgEl) {
       const X = l.x || 0, Y = l.y || 0, w = l.w || CW, h = l.h || CH;
       x.translate(X + w / 2, Y + h / 2); x.rotate((l.rotation || 0) * Math.PI / 180);
-      x.drawImage(portraitSource(l, o) || l.imgEl, -w / 2, -h / 2, w, h);
+      x.drawImage(src || layerSource(l, o) || l.imgEl, -w / 2, -h / 2, w, h);
     } else if (l.type === 'solid') {
-      x.fillStyle = g.solidColor || '#444'; x.fillRect(l.x || 0, l.y || 0, l.w || CW, l.h || CH);
+      if (!masking) { x.fillStyle = g.solidColor || '#444'; x.fillRect(l.x || 0, l.y || 0, l.w || CW, l.h || CH); }
     } else if (l.type === 'collage') {
       const frags = (l.placed || []).filter(f => f.visible !== false).sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
-      const ps = portraitSource(l, o); // retouched source: fragments are re-cut from it
+      const ps = src || layerSource(l, o); // processed source: fragments are re-cut from it
       for (const f of frags) {
-        const im = (ps && f.area) ? null : img(f.dataUrl, onPending);
-        if (!im && !(ps && f.area)) continue;
-        x.save(); x.globalAlpha = f.opacity ?? 1;
+        const fromSrc = !!(ps && f.area);
+        if (masking && !fromSrc) continue;
+        const im = fromSrc ? null : img(f.dataUrl, onPending);
+        if (!im && !fromSrc) continue;
+        x.save(); x.globalAlpha = masking ? 1 : (f.opacity ?? 1);
         x.translate(f.x + f.w / 2, f.y + f.h / 2); x.rotate((f.rotation || 0) * Math.PI / 180);
         if (f.flipped) x.scale(-1, 1);
-        if (f.borderStyle === 'shadow') { x.shadowColor = 'rgba(0,0,0,.4)'; x.shadowBlur = 16 * scale; x.shadowOffsetX = 4 * scale; x.shadowOffsetY = 6 * scale; }
-        if (f.borderStyle === 'glow') { x.shadowColor = 'rgba(232,213,163,.5)'; x.shadowBlur = 18 * scale; }
+        if (!masking && f.borderStyle === 'shadow') { x.shadowColor = 'rgba(0,0,0,.4)'; x.shadowBlur = 16 * scale; x.shadowOffsetX = 4 * scale; x.shadowOffsetY = 6 * scale; }
+        if (!masking && f.borderStyle === 'glow') { x.shadowColor = 'rgba(232,213,163,.5)'; x.shadowBlur = 18 * scale; }
         if (f.borderRadius > 0) {
-          x.beginPath(); x.roundRect(-f.w / 2, -f.h / 2, f.w, f.h, f.borderRadius); x.fillStyle = '#000'; x.fill();
+          x.beginPath(); x.roundRect(-f.w / 2, -f.h / 2, f.w, f.h, f.borderRadius);
+          if (!masking && f.borderStyle) { x.fillStyle = '#000'; x.fill(); }
           x.shadowColor = 'transparent'; x.clip();
         }
         if (im) drawCover(x, im, -f.w / 2, -f.h / 2, f.w, f.h);
@@ -442,11 +469,22 @@
   }
 
   // Render one layer, fully graded, to its own canvas at CW*scale × CH*scale.
+  // With grade.target 'subject' or 'background', Looks / Grade / FX only land
+  // on that part of the photo (the subject mask comes from seg.js).
   function renderLayer(l, o) {
     const { scale, CW, CH } = o, g = l.grade || {};
     const lc = canvas(CW * scale, CH * scale);
     drawContent(lc, l, o);
     if (l.type === 'solid') return lc;
+    let orig = null, targetMask = null;
+    if ((g.target === 'subject' || g.target === 'background') && l.imgEl && global.DZSeg && global.DZBg) {
+      const mask = global.DZSeg.get(l.imgEl, o.onPending);
+      if (mask) {
+        targetMask = canvas(lc.width, lc.height);
+        drawContent(targetMask, l, o, global.DZBg.shapedMask(mask, g.bg, g.target === 'background'));
+        orig = canvas(lc.width, lc.height); orig.getContext('2d').drawImage(lc, 0, 0);
+      }
+    }
     if (g.blur > 0) blurInPlace(lc, g.blur * 0.12 * scale);
     if (g.clarity) unsharp(lc, 10 * scale, g.clarity / 100 * 0.8);
     if (g.sharpness > 0) unsharp(lc, 1.2 * scale, g.sharpness / 100 * 1.5);
@@ -456,16 +494,26 @@
     if (g.glow > 0) glow(lc, g.glow, scale);
     if (g.vignette > 0) vignette(lc, g.vignette);
     if (g.grain > 0) grain(lc, g.grain, scale);
+    if (orig) {
+      const x = lc.getContext('2d');
+      x.globalCompositeOperation = 'destination-in'; x.drawImage(targetMask, 0, 0);
+      const ox = orig.getContext('2d');
+      ox.globalCompositeOperation = 'destination-out'; ox.drawImage(targetMask, 0, 0);
+      ox.globalCompositeOperation = 'lighter'; ox.drawImage(lc, 0, 0);
+      return orig;
+    }
     return lc;
   }
 
   // Composite every visible layer onto ctx (whose canvas is CW*scale × CH*scale).
+  // bgColor 'transparent' leaves the canvas see-through (for PNG cut-outs).
   function renderComposite(ctx, layers, o) {
     const { scale, CW, CH, bgColor } = o;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = bgColor || '#0f0f0f'; ctx.fillRect(0, 0, CW * scale, CH * scale);
+    ctx.clearRect(0, 0, CW * scale, CH * scale);
+    if (bgColor !== 'transparent') { ctx.fillStyle = bgColor || '#0f0f0f'; ctx.fillRect(0, 0, CW * scale, CH * scale); }
     for (const l of layers) {
       if (l.visible === false) continue;
       const g = l.grade || {};

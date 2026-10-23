@@ -965,6 +965,9 @@ function App(){
   const [zoom,setZoom]=useState(1);
   const [showBefore,setShowBefore]=useState(false);
   const [mixBand,setMixBand]=useState('orange');
+  const [showMask,setShowMask]=useState(false);
+  const [,setSegVer]=useState(0);
+  const bgImageRef=useRef(null);
   const curveDragRef=useRef(null);
   const histRef=useRef(null);
   const GRID=20;
@@ -1284,7 +1287,7 @@ function App(){
   const canvasRef=useRef(null);
   const draggingRef=useRef(false);
   const viewRef=useRef({});
-  viewRef.current={CW,CH,bgColor,zoom,before:showBefore};
+  viewRef.current={CW,CH,bgColor,zoom,before:showBefore,showMaskFor:(rtab==='bg'&&showMask)?activeLayerId:null};
   const rafRef=useRef(0);
   const drawPreview=useCallback(()=>{
     cancelAnimationFrame(rafRef.current);
@@ -1295,12 +1298,18 @@ function App(){
       const w=Math.round(V.CW*pr),hh=Math.round(V.CH*pr);
       if(c.width!==w||c.height!==hh){c.width=w;c.height=hh;}
       const ls=V.before?layersRef.current.map(ungraded):layersRef.current;
-      try{window.DZ.renderComposite(c.getContext('2d'),ls,{scale:pr,CW:V.CW,CH:V.CH,bgColor:V.bgColor,onPending:drawPreview});}
+      try{window.DZ.renderComposite(c.getContext('2d'),ls,{scale:pr,CW:V.CW,CH:V.CH,bgColor:V.bgColor,showMaskFor:V.before?null:V.showMaskFor,onPending:drawPreview});}
       catch(err){console.error('Preview render failed:',err);}
       if(!draggingRef.current) drawHistogram(c,histRef.current);
     });
   },[]);
-  useEffect(()=>{drawPreview();},[layers,bgColor,CW,CH,zoom,appTab,viewMode,dragState,showBefore,rightOpen,drawPreview]);
+  useEffect(()=>{drawPreview();},[layers,bgColor,CW,CH,zoom,appTab,viewMode,dragState,showBefore,rightOpen,showMask,rtab,activeLayerId,drawPreview]);
+
+  // Start finding the subject when the BG tab opens (or a layer needs it).
+  useEffect(()=>{
+    const want=layers.filter(l=>l.imgEl&&(l.id===activeLayerId&&rtab==='bg'||window.DZBg.active(l.grade?.bg)||l.grade?.target==='subject'||l.grade?.target==='background'));
+    want.forEach(l=>window.DZSeg.get(l.imgEl,()=>{setSegVer(v=>v+1);drawPreview();}));
+  },[layers,activeLayerId,rtab,drawPreview]);
 
   // Hold backslash to compare with the original.
   useEffect(()=>{
@@ -1322,6 +1331,10 @@ function App(){
     return()=>ro.disconnect();
   },[CW,CH,appTab,viewMode,leftOpen,rightOpen]);
 
+  // Exports wait for any subject masks they need (seg.js).
+  const waitForMasks=(ls)=>Promise.all(ls.filter(l=>l.visible!==false&&l.imgEl&&(window.DZBg.active(l.grade?.bg)||['subject','background'].includes(l.grade?.target)))
+    .map(l=>new Promise(res=>{if(window.DZSeg.get(l.imgEl,res)||window.DZSeg.status(l.imgEl)==='failed') res();})));
+
   // ── Still export (PNG / JPG) ──────────────────────────────────────────────
   const doExport=useCallback(async(fmt,scale,customName)=>{
     const baseName=(customName||projectName||'daszframe').replace(/[^a-zA-Z0-9_\- ]/g,'').trim()||'daszframe';
@@ -1331,7 +1344,8 @@ function App(){
       const ctx=c.getContext('2d');
       if(!ctx) throw new Error('This device could not create a canvas that large.');
       await window.DZ.preload(window.DZ.layerSources(layersRef.current));
-      window.DZ.renderComposite(ctx,layersRef.current,{scale:sc,CW,CH,bgColor,hq:true});
+      await waitForMasks(layersRef.current);
+      window.DZ.renderComposite(ctx,layersRef.current,{scale:sc,CW,CH,bgColor:(bgColor==='transparent'&&fmt==='jpg')?'#ffffff':bgColor,hq:true});
       const blob=await new Promise(res=>c.toBlob(res,mime,.95));
       if(!blob) throw new Error('The image was too large for this device.');
       const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`${baseName}.${fmt}`;a.click();
@@ -1508,7 +1522,9 @@ function App(){
             ['#0f0f0f','#ffffff','#f5f0e8','#e2ddd6','#1a1a2e'].map(c=>
               h('div',{key:c,onClick:()=>setBgColor(c),style:{width:18,height:18,background:c,borderRadius:2,cursor:'pointer',border:bgColor===c?'2px solid var(--acc)':'1px solid var(--b2)'}})
             ),
-            h('input',{type:'color',value:bgColor,onChange:e=>setBgColor(e.target.value),style:{width:18,height:18,border:'none',background:'none',cursor:'pointer',padding:0}})
+            h('div',{title:'Transparent (PNG export keeps it see-through)',onClick:()=>setBgColor('transparent'),className:'checker',
+              style:{width:18,height:18,borderRadius:2,cursor:'pointer',border:bgColor==='transparent'?'2px solid var(--acc)':'1px solid var(--b2)'}}),
+            h('input',{type:'color',value:bgColor==='transparent'?'#000000':bgColor,onChange:e=>setBgColor(e.target.value),style:{width:18,height:18,border:'none',background:'none',cursor:'pointer',padding:0}})
           )
         )
       )
@@ -1603,10 +1619,13 @@ function App(){
           h('div',{className:`tab${rtab==='grade'?' on':''}`,onClick:()=>setRtab('grade')},'Grade'),
           h('div',{className:`tab${rtab==='fx'?' on':''}`,onClick:()=>setRtab('fx')},'FX'),
           h('div',{className:`tab${rtab==='portrait'?' on':''}`,onClick:()=>setRtab('portrait')},'Portrait'),
+          h('div',{className:`tab${rtab==='bg'?' on':''}`,onClick:()=>setRtab('bg')},'BG'),
           h('div',{className:`tab${rtab==='frag'?' on':''}`,onClick:()=>setRtab('frag')},'Layer'),
         ),
 
         !activeLayer&&h('div',{style:{color:'var(--muted)',fontSize:11,textAlign:'center',padding:16,lineHeight:1.8}},'Select a layer\nto start grading.'),
+        activeLayer&&['looks','grade','fx'].includes(rtab)&&(g.target==='subject'||g.target==='background')&&
+          h('div',{className:'target-pill',onClick:()=>setRtab('bg')},`Applying to the ${g.target} only · change in BG`),
 
         // ── LOOKS TAB ──────────────────────────────────────────────────────
         rtab==='looks'&&activeLayer&&h('div',null,
@@ -1823,19 +1842,62 @@ function App(){
               )
             )
           ),
-          h('div',{className:'node-graph'},
-            h('div',{className:'node-title'},'◈ Background'),
-            h('div',{style:{display:'flex',flexDirection:'column',gap:4}},
-              h('button',{className:'btn sm full',onClick:()=>{
-                // Simple BG blur — add blur to bottom-most layer
-                const bottomL=layers[0];if(bottomL) updateGrade(bottomL.id,{blur:30});
-              }},'Blur Background'),
-              h('button',{className:'btn sm full',onClick:()=>{
-                const bottomL=layers[0];if(bottomL) updateGrade(bottomL.id,{blur:0,look:'none'});
-              }},'Reset Background'),
-              h('button',{className:'btn sm full',onClick:()=>fileInputRef.current?.click()},'Replace Background Photo')
-            )
-          )
+          h('div',{className:'hint',style:{marginTop:8}},'To blur, darken or replace only the background, use the BG tab.')
+        ),
+
+        // ── BACKGROUND TAB ────────────────────────────────────────────────
+        rtab==='bg'&&activeLayer&&h('div',{className:'sec'},
+          !activeLayer.imgEl
+            ?h('div',{className:'hint'},'Background tools work on photo and collage layers.')
+            :(()=>{
+              const st=window.DZSeg.status(activeLayer.imgEl);
+              const b={...window.DZBg.DEFAULTS,...(g.bg||{})};
+              const setBg=(k,v)=>updateGrade(gid,{bg:{...(g.bg||{}),[k]:v}});
+              const slider=(label,k,mn,mx)=>h('div',{key:k,className:'srow wide'},
+                h('span',{className:'srow-label'},label),
+                h('input',{type:'range',min:mn,max:mx,step:1,value:b[k],onChange:e=>setBg(k,+e.target.value),onMouseUp:commitGrade,onTouchEnd:commitGrade}),
+                h('span',{className:'srow-val'},b[k]>0&&mn<0?`+${b[k]}`:b[k]));
+              const chips=(opts,val,on)=>h('div',{className:'chip-row'},opts.map(([v,label])=>
+                h('div',{key:v,className:`chip${val===v?' on':''}`,onClick:()=>on(v)},label)));
+              return h(Fragment,null,
+                h('div',{className:`seg-status ${st}`},
+                  st==='ready'?'✓ Subject found':st==='failed'?'Couldn’t separate the subject.':'Finding the subject… (the first time downloads about 6 MB)',
+                  st==='failed'&&h('button',{className:'btn xs',style:{marginLeft:8},onClick:()=>{window.DZSeg.retry(activeLayer.imgEl);setSegVer(v=>v+1);}},'Retry'),
+                  st==='ready'&&h('button',{className:`btn xs${showMask?' act':''}`,style:{marginLeft:'auto'},onClick:()=>setShowMask(v=>!v)},showMask?'Hide mask':'Show mask')),
+                h('div',{className:'node-graph'},
+                  h('div',{className:'node-title'},'◈ Background'),
+                  slider('Blur','blur',0,100),
+                  b.mode!=='transparent'&&h(Fragment,null,
+                    slider('Exposure','exposure',-100,100),
+                    slider('Saturation','saturation',-100,100),
+                    slider('Temperature','temperature',-100,100))),
+                h('div',{className:'node-graph'},
+                  h('div',{className:'node-title'},'◈ Replace'),
+                  chips([['keep','Keep'],['color','Color'],['image','Image'],['transparent','Remove']],b.mode,(v)=>{
+                    setBg('mode',v);endGesture();
+                    if(v==='image'&&!b.image) bgImageRef.current?.click();
+                    if(v==='transparent'){setBgColor('transparent');setStatusNote('Background removed. The canvas is now transparent, so a PNG export keeps the cut-out.');}
+                  }),
+                  b.mode==='color'&&h('div',{style:{display:'flex',gap:5,flexWrap:'wrap',alignItems:'center',marginTop:6}},
+                    ['#ffffff','#f2ede2','#1d1d1f','#000000','#e8d5a3','#2b4c7e','#7a2e2e','#3d6b4f'].map(c=>
+                      h('div',{key:c,onClick:()=>{setBg('color',c);endGesture();},className:'swatch',style:{background:c,outline:b.color===c?'2px solid var(--acc)':'none'}})),
+                    h('input',{type:'color',value:b.color,onChange:e=>setBg('color',e.target.value),className:'swatch-input'})),
+                  b.mode==='image'&&h('button',{className:'btn sm full',style:{marginTop:6},onClick:()=>bgImageRef.current?.click()},b.image?'↻ Choose another image':'↑ Choose background image'),
+                  h('input',{ref:bgImageRef,type:'file',accept:'image/*',style:{display:'none'},onChange:e=>{
+                    const f=e.target.files[0];e.target.value='';if(!f) return;
+                    const r=new FileReader();r.onload=()=>{updateGrade(gid,{bg:{...(g.bg||{}),mode:'image',image:r.result}});endGesture();};r.readAsDataURL(f);}})),
+                h('div',{className:'node-graph'},
+                  h('div',{className:'node-title'},'◈ Edges'),
+                  slider('Softness','softness',0,100),
+                  slider('Shift','shift',-50,50),
+                  h('div',{className:'hint',style:{marginBottom:0}},'Shift grows (+) or shrinks (−) the subject. Use Show mask to check: red is background.')),
+                h('div',{className:'node-graph'},
+                  h('div',{className:'node-title'},'◈ Apply Looks, Grade & FX to'),
+                  chips([['all','Whole photo'],['subject','Subject'],['background','Background']],g.target||'all',(v)=>{updateGrade(gid,{target:v});endGesture();}),
+                  h('div',{className:'hint',style:{marginBottom:0}},'For example: Noir on the background only, or skin-friendly grading on the person only.')),
+                window.DZBg.active(g.bg)&&h('button',{className:'btn sm full',style:{marginTop:2},onClick:()=>{updateGrade(gid,{bg:{}});endGesture();}},'Reset Background')
+              );
+            })()
         ),
 
         // ── PORTRAIT TAB ──────────────────────────────────────────────────
@@ -1964,7 +2026,7 @@ function App(){
     const sel=selectedFragId;
     return h('div',{className:'stage-fit',style:{width:CW*zoom,height:CH*zoom}},
       h('div',{
-        className:'stage',
+        className:`stage${bgColor==='transparent'?' checker':''}`,
         ref:overlayRef,
         style:{width:CW,height:CH,position:'relative',overflow:'hidden',transform:`scale(${zoom})`,transformOrigin:'0 0'},
         onPointerDown:e=>{if(e.target===overlayRef.current||e.target===canvasRef.current){setSelectedFragId(null);}},

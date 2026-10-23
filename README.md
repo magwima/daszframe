@@ -25,6 +25,11 @@ By Michael Kagwima.
   Fuji, Documentary, and a real dot-screen Halftone, each with adjustable strength.
 - **Portrait retouch** — Face Light, Eye Enhancer, Skin Smoothing and Teeth Whitening, guided by
   the detected face so only skin, eyes and teeth are touched. On a collage, every fragment updates.
+- **Background tools** — DASZFRAME separates the people from the background (on your device) and
+  lets you blur, darken, desaturate or recolour only the background, replace it with a colour or
+  another image, or remove it for a transparent PNG cut-out. Looks, Grade and FX can be applied to
+  the whole photo, the subject only or the background only. Edge softness and shift controls,
+  plus a mask view, help with tricky edges.
 - **Colour grading** — exposure, contrast, highlights, shadows, whites, blacks, saturation,
   vibrance, temperature, tint, lift / gamma / gain, a draggable **Tone Curve**, and a
   **Color Mixer** (hue, saturation and luminance for 8 colour ranges).
@@ -53,7 +58,10 @@ Badges can be moved, resized and labelled, then exported as PNG.
 | `docs/js/engine.js` | Renderer shared by the live preview and export. |
 | `docs/js/faces.js` | In-browser face detection and fragment regions. |
 | `docs/js/portrait.js` | Face-guided retouch (light, eyes, skin, teeth). |
+| `docs/js/seg.js` | Subject / background separation with edge refinement. |
+| `docs/js/background.js` | Background blur, adjustments, replacement and removal. |
 | `docs/js/store.js` | Project files and autosave (IndexedDB). |
+| `docs/vendor/selfie/` | [MediaPipe Selfie Segmentation](https://github.com/google/mediapipe) (Apache-2.0), ~6 MB, loaded only when background tools are used. |
 | `docs/vendor/face-api/` | [face-api](https://github.com/vladmandic/face-api) (MIT) and its two models (~2 MB, loaded only when you make a collage). |
 | `extension/` | Chrome extension shell (manifest, background script, icons) and its build script. |
 
@@ -94,4 +102,5 @@ large screen; dragging works with touch, but the layout is not yet adapted for p
 ## Licence notes
 
 Bundled third-party code: React (MIT), face-api by Vladimir Mandic (MIT, see
-`docs/vendor/face-api/LICENSE`).
+`docs/vendor/face-api/LICENSE`), MediaPipe Selfie Segmentation (Apache-2.0, see
+`docs/vendor/selfie/LICENSE`).
