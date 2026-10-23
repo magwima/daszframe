@@ -37,7 +37,7 @@
         fragments: (l.fragments || []).map(frag), placed: (l.placed || []).map(frag) };
     });
     return { format: FORMAT, name: state.name, savedAt: new Date().toISOString(),
-      canvasSizeId: state.canvasSizeId, bgColor: state.bgColor, layoutMode: state.layoutMode,
+      canvasSizeId: state.canvasSizeId, canvasCustom: state.canvasCustom || null, bgColor: state.bgColor, layoutMode: state.layoutMode,
       activeLayerId: state.activeLayerId, images, layers };
   }
 

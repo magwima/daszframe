@@ -121,6 +121,36 @@ function fitBox(ar,w,h=w){
   return (w/h>ar)?{w:h*ar,h}:{w,h:w/ar};
 }
 
+// ── Photo placement & canvas sizing ─────────────────────────────────────────
+// 'fit' shows the whole photo inside the canvas; 'fill' covers it (may crop).
+function placePhoto(imgEl,mode,CW,CH){
+  const iw=imgEl.naturalWidth,ih=imgEl.naturalHeight;
+  const k=mode==='fill'?Math.max(CW/iw,CH/ih):Math.min(CW/iw,CH/ih);
+  const w=iw*k,h=ih*k;
+  return{x:(CW-w)/2,y:(CH-h)/2,w,h,rotation:0,fit:mode};
+}
+// A canvas the same shape as a photo, long side 800 (4× export = 3200px).
+// When the photo's ratio allows, the long side is chosen (700–900) so the short
+// side is a whole number and "Original size" exports come out pixel-exact.
+function canvasForPhoto(iw,ih){
+  const big=Math.max(iw,ih),small=Math.min(iw,ih);
+  const gcd=(a,b)=>b?gcd(b,a%b):a,g=gcd(big,small),q=big/g;
+  let L=800;
+  if(q<=200){for(let d=0;d<=100;d++){if((800+d)%q===0){L=800+d;break;}if((800-d)%q===0){L=800-d;break;}}}
+  const S=Math.round(L*small/big);
+  return iw>=ih?{w:L,h:S}:{w:S,h:L};
+}
+// Keep layers in place when the canvas changes size.
+function rescaleLayer(l,oW,oH,nW,nH){
+  if(oW===nW&&oH===nH) return l;
+  if(l.type==='photo'&&l.imgEl&&(l.fit==='fit'||l.fit==='fill')) return{...l,...placePhoto(l.imgEl,l.fit,nW,nH),rotation:l.rotation||0};
+  const sx=nW/oW,sy=nH/oH,k=Math.sqrt(sx*sy);
+  const move=(o)=>({x:(o.x+o.w/2)*sx-o.w*k/2,y:(o.y+o.h/2)*sy-o.h*k/2,w:o.w*k,h:o.h*k});
+  if(l.type==='collage') return{...l,placed:l.placed.map(f=>({...f,...move(f)}))};
+  if(l.type==='solid') return{...l,x:(l.x||0)*sx,y:(l.y||0)*sy,w:(l.w||oW)*sx,h:(l.h||oH)*sy};
+  return{...l,...move({x:l.x||0,y:l.y||0,w:l.w||oW,h:l.h||oH})};
+}
+
 // Live RGB histogram of the preview canvas, drawn into `dst`.
 // Small markers light up when highlights or shadows are clipping.
 function drawHistogram(src,dst){
@@ -939,7 +969,8 @@ function App(){
   const histRef=useRef(null);
   const GRID=20;
 
-  const cs=CANVAS_SIZES.find(s=>s.id===canvasSizeId)||CANVAS_SIZES[1];
+  const [canvasCustom,setCanvasCustom]=useState(null); // {w,h} when the canvas matches a photo
+  const cs=(canvasSizeId==='custom'&&canvasCustom)?{id:'custom',label:'Photo',...canvasCustom}:(CANVAS_SIZES.find(s=>s.id===canvasSizeId)||CANVAS_SIZES[1]);
   const CW=cs.w,CH=cs.h;
 
   // ── Undo / redo ────────────────────────────────────────────────────────────
@@ -982,6 +1013,23 @@ function App(){
   },[commit]);
   const commitGrade=endGesture;
 
+  // ── Canvas size ───────────────────────────────────────────────────────────
+  const changeCanvas=useCallback((id,custom)=>{
+    const ns=id==='custom'?custom:(CANVAS_SIZES.find(s=>s.id===id)||CANVAS_SIZES[1]);
+    if(ns.w!==CW||ns.h!==CH) commit(prev=>prev.map(l=>rescaleLayer(l,CW,CH,ns.w,ns.h)));
+    if(id==='custom') setCanvasCustom({w:ns.w,h:ns.h});
+    setCanvasSizeId(id);
+  },[CW,CH,commit]);
+  const matchPhoto=useCallback((l)=>{
+    if(!l||!l.imgEl) return;
+    if(l.type==='photo') commit(prev=>prev.map(x=>x.id===l.id?{...x,fit:'fill'}:x));
+    changeCanvas('custom',canvasForPhoto(l.imgEl.naturalWidth,l.imgEl.naturalHeight));
+    setStatusNote(`Canvas matched to ${l.name} (${l.imgEl.naturalWidth}×${l.imgEl.naturalHeight}).`);
+  },[commit,changeCanvas]);
+  const setPhotoFit=useCallback((l,mode)=>{
+    commit(prev=>prev.map(x=>x.id===l.id?{...x,...placePhoto(x.imgEl,mode,CW,CH),rotation:x.rotation||0}:x));
+  },[commit,CW,CH]);
+
   // ── Add photo layer ────────────────────────────────────────────────────────
   const addPhotoLayer=useCallback(async(file,asCollage=false)=>{
     if(!file||!file.type.startsWith('image/')) return;
@@ -1020,14 +1068,20 @@ function App(){
       placed=composeLayout(frags,layoutMode,CW,CH);
     }
 
-    // Photo layers keep their shape: scaled to cover the canvas, centred.
-    const k=Math.max(CW/img.naturalWidth,CH/img.naturalHeight);
-    const w=img.naturalWidth*k,hh=img.naturalHeight*k;
+    // The first photo on an empty canvas sets the canvas to its shape, so
+    // nothing is cropped. Later photos fit inside the canvas whole.
+    let cw=CW,ch=CH,place;
+    if(!asCollage&&layersRef.current.length===0){
+      const sz=canvasForPhoto(img.naturalWidth,img.naturalHeight);
+      cw=sz.w;ch=sz.h;setCanvasCustom(sz);setCanvasSizeId('custom');
+      place=placePhoto(img,'fill',cw,ch);
+      note=`Canvas matched to your photo (${img.naturalWidth}×${img.naturalHeight}). Export "Original size" keeps every pixel.`;
+    } else place=asCollage?{x:0,y:0,w:CW,h:CH,rotation:0}:placePhoto(img,'fit',cw,ch);
     const newLayer={
       id:uid(),name,type:asCollage?'collage':'photo',
       srcUrl:url,imgEl:img,
       fragments:frags,placed,
-      x:(CW-w)/2,y:(CH-hh)/2,w,h:hh,rotation:0,
+      ...place,
       grade:defaultGrade(),face,
       visible:true,locked:false,
     };
@@ -1162,13 +1216,14 @@ function App(){
 
   // ── Sessions: save, open, autosave, restore ───────────────────────────────
   const snapshot=useCallback(()=>window.DZStore.serialize(
-    {layers:layersRef.current,name:projectName,canvasSizeId,bgColor,layoutMode,activeLayerId},
-    srcDataCache.current),[projectName,canvasSizeId,bgColor,layoutMode,activeLayerId]);
+    {layers:layersRef.current,name:projectName,canvasSizeId,canvasCustom,bgColor,layoutMode,activeLayerId},
+    srcDataCache.current),[projectName,canvasSizeId,canvasCustom,bgColor,layoutMode,activeLayerId]);
 
   const applySession=useCallback(async(session)=>{
     const s=await window.DZStore.deserialize(session);
     setProjectName(s.name||'Untitled Project');
-    if(s.canvasSizeId) setCanvasSizeId(s.canvasSizeId);
+    setCanvasCustom(s.canvasCustom||null);
+    if(s.canvasSizeId) setCanvasSizeId(s.canvasSizeId==='custom'&&!s.canvasCustom?'sq_md':s.canvasSizeId);
     if(s.bgColor) setBgColor(s.bgColor);
     if(s.layoutMode) setLayoutMode(s.layoutMode);
     setLive(s.layers);resetHistory(s.layers);
@@ -1223,7 +1278,7 @@ function App(){
       catch(err){console.warn('Autosave failed:',err);}
     },1500);
     return()=>clearTimeout(t);
-  },[layers,projectName,canvasSizeId,bgColor,layoutMode,restoreOffer,snapshot]);
+  },[layers,projectName,canvasSizeId,canvasCustom,bgColor,layoutMode,restoreOffer,snapshot]);
 
   // ── Live preview: the same engine as export, drawn to a canvas ─────────────
   const canvasRef=useRef(null);
@@ -1272,7 +1327,7 @@ function App(){
     const baseName=(customName||projectName||'daszframe').replace(/[^a-zA-Z0-9_\- ]/g,'').trim()||'daszframe';
     const mime=fmt==='jpg'?'image/jpeg':'image/png';
     const render=async(sc)=>{
-      const c=document.createElement('canvas');c.width=CW*sc;c.height=CH*sc;
+      const c=document.createElement('canvas');c.width=Math.round(CW*sc);c.height=Math.round(CH*sc);
       const ctx=c.getContext('2d');
       if(!ctx) throw new Error('This device could not create a canvas that large.');
       await window.DZ.preload(window.DZ.layerSources(layersRef.current));
@@ -1282,7 +1337,7 @@ function App(){
       const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`${baseName}.${fmt}`;a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),10000);
     };
-    setIsProc(true);setProcMsg(`Rendering ${CW*scale}×${CH*scale}…`);await tick();
+    setIsProc(true);setProcMsg(`Rendering ${Math.round(CW*scale)}×${Math.round(CH*scale)}…`);await tick();
     try{await render(scale);return true;}
     catch(err){
       if(scale>1){
@@ -1439,10 +1494,15 @@ function App(){
         h('div',{className:'sec'},
           h('div',{className:'slabel'},'Canvas'),
           h('div',{style:{display:'flex',flexDirection:'column',gap:3}},
+            canvasCustom&&h('button',{className:`btn sm${canvasSizeId==='custom'?' act':''}`,
+              style:{justifyContent:'space-between'},onClick:()=>changeCanvas('custom',canvasCustom)},
+              h('span',null,'Photo shape'),h('span',{style:{color:'var(--muted)',fontSize:9,fontFamily:'var(--fm)'}},`${canvasCustom.w}×${canvasCustom.h}`)),
             CANVAS_SIZES.map(s=>h('button',{key:s.id,className:`btn sm${canvasSizeId===s.id?' act':''}`,
-              style:{justifyContent:'space-between'},onClick:()=>setCanvasSizeId(s.id)},
+              style:{justifyContent:'space-between'},onClick:()=>changeCanvas(s.id)},
               h('span',null,s.label),h('span',{style:{color:'var(--muted)',fontSize:9,fontFamily:'var(--fm)'}},`${s.w}×${s.h}`)
-            ))
+            )),
+            activeLayer?.imgEl&&h('button',{className:'btn sm full',style:{marginTop:3},title:'Reshape the canvas to the selected photo',
+              onClick:()=>matchPhoto(activeLayer)},'⤢ Match Canvas to Photo')
           ),
           h('div',{style:{display:'flex',gap:5,flexWrap:'wrap',alignItems:'center',marginTop:6}},
             ['#0f0f0f','#ffffff','#f5f0e8','#e2ddd6','#1a1a2e'].map(c=>
@@ -1814,19 +1874,24 @@ function App(){
             h('div',{className:'pgrid2'},
               ['x','y'].map(p=>h('div',{key:p,className:'pfield'},
                 h('div',{className:'pfield-lbl'},p.toUpperCase()),
-                h('input',{type:'number',value:Math.round(activeLayer[p]||0),onChange:e=>updateLayer(activeLayer.id,{[p]:+e.target.value})})
+                h('input',{type:'number',value:Math.round(activeLayer[p]||0),onChange:e=>updateLayer(activeLayer.id,{[p]:+e.target.value,fit:'custom'})})
               ))
             ),
             h('div',{className:'pgrid2'},
               ['w','h'].map(p=>h('div',{key:p,className:'pfield'},
                 h('div',{className:'pfield-lbl'},p==='w'?'WIDTH':'HEIGHT'),
-                h('input',{type:'number',value:Math.round(activeLayer[p]||0),onChange:e=>updateLayer(activeLayer.id,{[p]:+e.target.value})})
+                h('input',{type:'number',value:Math.round(activeLayer[p]||0),onChange:e=>updateLayer(activeLayer.id,{[p]:+e.target.value,fit:'custom'})})
               ))
             ),
             h('div',{className:'srow'},
               h('span',{className:'srow-label'},'Rotation'),
               h('input',{type:'range',min:-180,max:180,step:1,value:activeLayer.rotation||0,onChange:e=>updateLayer(activeLayer.id,{rotation:+e.target.value})}),
               h('span',{className:'srow-val'},`${activeLayer.rotation||0}°`)
+            ),
+            activeLayer.type==='photo'&&activeLayer.imgEl&&h('div',{style:{display:'flex',gap:4,marginTop:4}},
+              h('button',{className:`btn sm${activeLayer.fit==='fit'?' act':''}`,style:{flex:1},title:'Show the whole photo',onClick:()=>setPhotoFit(activeLayer,'fit')},'Fit'),
+              h('button',{className:`btn sm${activeLayer.fit==='fill'?' act':''}`,style:{flex:1},title:'Cover the canvas (may crop)',onClick:()=>setPhotoFit(activeLayer,'fill')},'Fill'),
+              h('button',{className:'btn sm',style:{flex:1.4},title:'Reshape the canvas to this photo',onClick:()=>matchPhoto(activeLayer)},'Match Canvas')
             ),
             h('div',{style:{display:'flex',gap:4,marginTop:4}},
               h('button',{className:'btn sm',style:{flex:1},onClick:()=>dupeLayer(activeLayer.id)},'⊕ Duplicate'),
@@ -1943,6 +2008,14 @@ function App(){
   function ExportModal(){
     const [fname,setFname]=useState(exportFilename||projectName||'daszframe');
     if(!showExport) return null;
+    // "Original size": the scale at which the sharpest photo layer is drawn
+    // at its own pixels (capped at 8192px a side / 50 megapixels).
+    let origScale=0;
+    layers.forEach(l=>{if(l.visible!==false&&l.type==='photo'&&l.imgEl&&l.w) origScale=Math.max(origScale,l.imgEl.naturalWidth/l.w);});
+    if(origScale){
+      origScale=Math.min(origScale,8192/Math.max(CW,CH),Math.sqrt(50e6/(CW*CH)));
+      if(Math.abs(origScale-1)<.02||Math.abs(origScale-2)<.02||Math.abs(origScale-4)<.02) origScale=0; // same as a preset
+    }
     return h('div',{className:'modal-bg',onClick:()=>setShowExport(false)},
       h('div',{className:'modal',style:{width:340},onClick:e=>e.stopPropagation()},
         h('div',{className:'modal-title'},'Export Image'),
@@ -1966,7 +2039,9 @@ function App(){
         h('div',{style:{fontSize:11,color:'var(--text2)',marginBottom:8}},
           'Format & Resolution'),
         h('div',{style:{display:'flex',flexDirection:'column',gap:5}},
-          [['png',1,`PNG — Standard · ${CW}×${CH}`,'↓'],
+          [...(origScale?[['png',origScale,`PNG — Original size · ${Math.round(CW*origScale)}×${Math.round(CH*origScale)}`,'↓'],
+                          ['jpg',origScale,`JPG — Original size · ${Math.round(CW*origScale)}×${Math.round(CH*origScale)}`,'↓']]:[]),
+           ['png',1,`PNG — Standard · ${CW}×${CH}`,'↓'],
            ['png',2,`PNG — HD · ${CW*2}×${CH*2}`,'↓'],
            ['png',4,`PNG — Print · ${CW*4}×${CH*4}`,'↓'],
            ['jpg',2,`JPG — HD · ${CW*2}×${CH*2}`,'↓'],

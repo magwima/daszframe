@@ -18,6 +18,9 @@ By Michael Kagwima.
 - **7 layouts** — DASZ (signature), Mosaic, Editorial, Cubist, Symmetry, Gallery, Experimental.
   Drag fragments to rearrange them; rotate, flip, round corners, change order, duplicate or delete.
 - **Layers** — stack photo, collage and solid-colour layers, each with its own grade, opacity and blend mode.
+- **Canvas that fits your photo** — the first photo sets the canvas to its own shape, so nothing is
+  cropped. Later photos fit inside whole (switch any photo between **Fit** and **Fill**), and
+  **Match Canvas to Photo** reshapes the canvas at any time.
 - **Film looks** — Cinematic, Vintage, B&W, Noir, Bleach Bypass, Teal & Orange, Editorial, Kodak,
   Fuji, Documentary, and a real dot-screen Halftone, each with adjustable strength.
 - **Portrait retouch** — Face Light, Eye Enhancer, Skin Smoothing and Teeth Whitening, guided by
@@ -29,7 +32,7 @@ By Michael Kagwima.
   a live histogram shows when highlights or shadows are clipping.
 - **Optical FX** — vignette, film grain, chromatic aberration, blur, glow, clarity, sharpness.
 - **LUTs** — import any 3D `.cube` LUT.
-- **Export** — PNG or JPG at 1×, 2× or 4× (up to 3416 px). Exports render from the full-resolution
+- **Export** — PNG or JPG at **Original size** (your photo's own pixels) or 1×, 2× and 4×. Exports render from the full-resolution
   source, and the preview uses the same renderer, so what you see is what you get.
 - **Projects** — save and reopen `.daszframe` files. Your work also autosaves in the browser,
   and DASZFRAME offers to restore it next time you open it.
