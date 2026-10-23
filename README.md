@@ -3,7 +3,7 @@
 Turn a portrait into a fragmented collage, or grade photos like film.
 Everything runs in your browser: **your photos never leave your device.**
 
-**Use it online:** https://magwima.github.io/dasz-frame-chrome-extension/
+**Use it online:** https://magwima.github.io/daszframe/
 
 By Michael Kagwima.
 
