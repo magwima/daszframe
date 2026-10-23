@@ -49,6 +49,8 @@ const FACE_REGIONS=[
   {id:'botStrip',  label:'Bot Strip',  area:{x:.00,y:.67,w:1.0,h:.33}},
 ];
 
+const IDENTITY_CURVE=[[0,0],[64,64],[128,128],[192,192],[255,255]];
+
 const BLEND_MODES=['normal','multiply','screen','overlay','darken','lighten','color-dodge','color-burn','hard-light','soft-light','difference','exclusion','hue','saturation','color','luminosity'];
 
 const CANVAS_SIZES=[
@@ -118,6 +120,33 @@ function fitBox(ar,w,h=w){
   ar=ar||1;
   return (w/h>ar)?{w:h*ar,h}:{w,h:w/ar};
 }
+
+// Live RGB histogram of the preview canvas, drawn into `dst`.
+// Small markers light up when highlights or shadows are clipping.
+function drawHistogram(src,dst){
+  const w=src.width,h=src.height;if(!w||!h||!dst) return;
+  let d;try{d=src.getContext('2d').getImageData(0,0,w,h).data;}catch(_){return;}
+  const R=new Uint32Array(256),G=new Uint32Array(256),B=new Uint32Array(256);
+  const step=4*Math.max(1,Math.floor(Math.sqrt(w*h/200000)));
+  let n=0;
+  for(let i=0;i<d.length;i+=step){R[d[i]]++;G[d[i+1]]++;B[d[i+2]]++;n++;}
+  let mx=1;for(let k=1;k<255;k++) mx=Math.max(mx,R[k],G[k],B[k]);
+  const x=dst.getContext('2d'),W=dst.width,H=dst.height;
+  x.clearRect(0,0,W,H);
+  x.globalCompositeOperation='lighter';
+  [[R,'rgba(235,80,80,.75)'],[G,'rgba(80,200,110,.75)'],[B,'rgba(80,130,240,.75)']].forEach(([c,col])=>{
+    x.fillStyle=col;x.beginPath();x.moveTo(0,H);
+    for(let k=0;k<256;k++) x.lineTo(k/255*W,H-Math.min(1,c[k]/mx)*(H-2));
+    x.lineTo(W,H);x.closePath();x.fill();
+  });
+  x.globalCompositeOperation='source-over';
+  const hiClip=(R[255]+G[255]+B[255])/(3*n)>.004,loClip=(R[0]+G[0]+B[0])/(3*n)>.004;
+  x.fillStyle=loClip?'#5aa0ff':'rgba(255,255,255,.12)';x.fillRect(2,2,7,7);
+  x.fillStyle=hiClip?'#ff5a5a':'rgba(255,255,255,.12)';x.fillRect(W-9,2,7,7);
+}
+
+// For before/after: a layer with its grade and retouch switched off.
+const ungraded=(l)=>{const g=l.grade||{};return{...l,grade:{opacity:g.opacity,blendMode:g.blendMode,solidColor:g.solidColor}};};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // LAYOUT COMPOSERS
@@ -904,6 +933,10 @@ function App(){
   const [variations,setVariations]=useState([]);
   const [snapGrid,setSnapGrid]=useState(false);
   const [zoom,setZoom]=useState(1);
+  const [showBefore,setShowBefore]=useState(false);
+  const [mixBand,setMixBand]=useState('orange');
+  const curveDragRef=useRef(null);
+  const histRef=useRef(null);
   const GRID=20;
 
   const cs=CANVAS_SIZES.find(s=>s.id===canvasSizeId)||CANVAS_SIZES[1];
@@ -1196,7 +1229,7 @@ function App(){
   const canvasRef=useRef(null);
   const draggingRef=useRef(false);
   const viewRef=useRef({});
-  viewRef.current={CW,CH,bgColor,zoom};
+  viewRef.current={CW,CH,bgColor,zoom,before:showBefore};
   const rafRef=useRef(0);
   const drawPreview=useCallback(()=>{
     cancelAnimationFrame(rafRef.current);
@@ -1206,11 +1239,23 @@ function App(){
       const pr=(draggingRef.current?1:Math.min(window.devicePixelRatio||1,2))*V.zoom;
       const w=Math.round(V.CW*pr),hh=Math.round(V.CH*pr);
       if(c.width!==w||c.height!==hh){c.width=w;c.height=hh;}
-      try{window.DZ.renderComposite(c.getContext('2d'),layersRef.current,{scale:pr,CW:V.CW,CH:V.CH,bgColor:V.bgColor,onPending:drawPreview});}
+      const ls=V.before?layersRef.current.map(ungraded):layersRef.current;
+      try{window.DZ.renderComposite(c.getContext('2d'),ls,{scale:pr,CW:V.CW,CH:V.CH,bgColor:V.bgColor,onPending:drawPreview});}
       catch(err){console.error('Preview render failed:',err);}
+      if(!draggingRef.current) drawHistogram(c,histRef.current);
     });
   },[]);
-  useEffect(()=>{drawPreview();},[layers,bgColor,CW,CH,zoom,appTab,viewMode,dragState,drawPreview]);
+  useEffect(()=>{drawPreview();},[layers,bgColor,CW,CH,zoom,appTab,viewMode,dragState,showBefore,rightOpen,drawPreview]);
+
+  // Hold backslash to compare with the original.
+  useEffect(()=>{
+    const isField=(el)=>el&&/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+    const down=(e)=>{if(e.key==='\\'&&!isField(e.target)){e.preventDefault();setShowBefore(true);}};
+    const up=(e)=>{if(e.key==='\\') setShowBefore(false);};
+    const blur=()=>setShowBefore(false);
+    window.addEventListener('keydown',down);window.addEventListener('keyup',up);window.addEventListener('blur',blur);
+    return()=>{window.removeEventListener('keydown',down);window.removeEventListener('keyup',up);window.removeEventListener('blur',blur);};
+  },[]);
 
   // Fit the canvas to the available space (never upscales past 100%).
   const stageWrapRef=useRef(null);
@@ -1410,6 +1455,75 @@ function App(){
     );
   }
 
+  // ── Tone Curve editor (Grade tab) ──────────────────────────────────────────
+  // Drag a point to move it, drag on empty space to add one, double-click a
+  // point to remove it. The ends can only move up and down.
+  function CurveEditor(g,gid){
+    const pts=[...(g.curvePoints||IDENTITY_CURVE)].map(p=>[...p]).sort((a,b)=>a[0]-b[0]);
+    const f=window.DZ.curveFn(pts);
+    let d='';for(let x=0;x<=256;x+=4){const v=Math.min(255,x);d+=(x?'L':'M')+v+' '+(255-Math.max(0,Math.min(255,f(v))));}
+    const local=(e)=>{const r=e.currentTarget.getBoundingClientRect();
+      return[clamp((e.clientX-r.left)/r.width*268-6,0,255),clamp(255-((e.clientY-r.top)/r.height*268-6),0,255)];}; // viewBox is -6..262
+    const nearest=(x,y)=>{let bi=-1,bd=1e9;pts.forEach(([px,py],i)=>{const dd=Math.hypot(px-x,py-y);if(dd<bd){bd=dd;bi=i;}});return bd<14?bi:-1;};
+    const setPts=(np)=>updateGrade(gid,{curvePoints:np});
+    return h('div',{className:'node-graph'},
+      h('div',{className:'node-title',style:{display:'flex',justifyContent:'space-between'}},'◈ Tone Curve',
+        !window.DZ.curveIdentity(pts)&&h('span',{style:{cursor:'pointer',color:'var(--muted)'},onClick:()=>{setPts(IDENTITY_CURVE);endGesture();}},'reset')),
+      h('svg',{className:'curve',viewBox:'-6 -6 268 268',
+        onPointerDown:e=>{
+          const [x,y]=local(e);let i=nearest(x,y);let np=pts;
+          if(i<0){ // add a point if there's room between neighbours
+            if(pts.some(p=>Math.abs(p[0]-x)<8)) return;
+            np=[...pts,[Math.round(x),Math.round(y)]].sort((a,b)=>a[0]-b[0]);
+            i=np.findIndex(p=>p[0]===Math.round(x));setPts(np);
+          }
+          curveDragRef.current={i,pts:np};e.currentTarget.setPointerCapture(e.pointerId);
+        },
+        onPointerMove:e=>{
+          const D=curveDragRef.current;if(!D) return;
+          const [x,y]=local(e);const np=D.pts.map(p=>[...p]);const last=np.length-1;
+          const nx=D.i===0?0:D.i===last?255:clamp(Math.round(x),np[D.i-1][0]+3,np[D.i+1][0]-3);
+          np[D.i]=[nx,Math.round(y)];D.pts=np;setPts(np);
+        },
+        onPointerUp:()=>{curveDragRef.current=null;endGesture();},
+        onPointerCancel:()=>{curveDragRef.current=null;endGesture();},
+        onDoubleClick:e=>{const [x,y]=local(e);const i=nearest(x,y);if(i>0&&i<pts.length-1){setPts(pts.filter((_,k)=>k!==i));endGesture();}},
+      },
+        [64,128,192].map(v=>h(Fragment,{key:v},
+          h('line',{x1:v,y1:0,x2:v,y2:255,className:'curve-grid'}),h('line',{x1:0,y1:v,x2:255,y2:v,className:'curve-grid'}))),
+        h('rect',{x:0,y:0,width:255,height:255,className:'curve-frame'}),
+        h('line',{x1:0,y1:255,x2:255,y2:0,className:'curve-diag'}),
+        h('path',{d,className:'curve-line'}),
+        pts.map(([x,y],i)=>h('circle',{key:i,cx:x,cy:255-y,r:5.5,className:'curve-pt'}))
+      ),
+      h('div',{className:'hint',style:{marginTop:4,marginBottom:0}},'Drag to shape · drag empty space to add · double-click to remove')
+    );
+  }
+
+  // ── Color Mixer (Grade tab): hue / saturation / luminance per colour ───────
+  function ColorMixer(g,gid){
+    const mx=g.mixer||{},band=mx[mixBand]||{};
+    const edited=(b)=>{const v=mx[b];return!!(v&&(v.h||v.s||v.l));};
+    return h('div',{className:'node-graph'},
+      h('div',{className:'node-title',style:{display:'flex',justifyContent:'space-between'}},'◈ Color Mixer',
+        Object.keys(mx).some(edited)&&h('span',{style:{cursor:'pointer',color:'var(--muted)'},onClick:()=>{updateGrade(gid,{mixer:{}});endGesture();}},'reset')),
+      h('div',{className:'bands'},
+        window.DZ.MIX_BANDS.map(([name,deg])=>h('button',{key:name,title:name,
+          className:`band${mixBand===name?' on':''}${edited(name)?' edited':''}`,
+          style:{background:`hsl(${deg},72%,52%)`},onClick:()=>setMixBand(name)}))),
+      h('div',{className:'hint',style:{textTransform:'capitalize',margin:'2px 0 6px'}},mixBand),
+      [['Hue','h'],['Saturation','s'],['Luminance','l']].map(([label,k])=>{
+        const val=band[k]||0;
+        return h('div',{key:k,className:'srow wide'},
+          h('span',{className:'srow-label'},label),
+          h('input',{type:'range',min:-100,max:100,step:1,value:val,
+            onChange:e=>updateGrade(gid,{mixer:{...mx,[mixBand]:{...band,[k]:+e.target.value}}}),
+            onMouseUp:commitGrade,onTouchEnd:commitGrade}),
+          h('span',{className:'srow-val'},val>0?`+${val}`:val));
+      })
+    );
+  }
+
   // Right panel — grade / effects / props
   function RightPanel(){
     const g=activeGrade;
@@ -1421,6 +1535,8 @@ function App(){
         h('span',{className:'ptitle'},activeLayer?`Grade: ${activeLayer.name}`:'Grading')
       ),
       h('div',{className:'pclabel',onClick:()=>setRightOpen(true)},'Grade'),
+      h('div',{className:'histo',style:{display:layers.length?'block':'none'},title:'Histogram · left square: shadows clipping · right square: highlights clipping'},
+        h('canvas',{ref:histRef,width:512,height:120})),
       h('div',{className:'pscroll'},
         h('div',{className:'tabs'},
           h('div',{className:`tab${rtab==='looks'?' on':''}`,onClick:()=>setRtab('looks')},'Looks'),
@@ -1604,6 +1720,8 @@ function App(){
                 )
               )
             ),
+            CurveEditor(g,gid),
+            ColorMixer(g,gid),
           ),
           // Blend mode for the layer
           h('div',{className:'sec'},
@@ -1805,6 +1923,8 @@ function App(){
             style:{left:l.x||0,top:l.y||0,width:l.w||CW,height:l.h||CH,transform:l.rotation?`rotate(${l.rotation}deg)`:undefined},
             onPointerDown:e=>{e.stopPropagation();setActiveLayerId(l.id);setSelectedFragId(null);}});
         }),
+
+        showBefore&&h('div',{className:'before-badge'},'BEFORE'),
 
         isProc&&h('div',{className:'lo'},h('div',{className:'lo-msg'},procMsg),h('div',{className:'lo-bar'},h('div',{className:'lo-fill'}))),
 
@@ -2018,6 +2138,9 @@ function App(){
           h('button',{className:`btn xs ghost${leftOpen?' act':''}`,title:'Toggle left panel',onClick:()=>setLeftOpen(o=>!o)},'◧'),
           h('button',{className:`btn xs ghost${rightOpen?' act':''}`,title:'Toggle right panel',onClick:()=>setRightOpen(o=>!o)},'◨'),
           h('div',{className:'tsep'}),
+          layers.length>0&&h('button',{className:`btn xs ghost${showBefore?' act':''}`,title:'Hold to see the original (or hold the \\ key)',
+            onPointerDown:e=>{e.preventDefault();setShowBefore(true);},onPointerUp:()=>setShowBefore(false),onPointerLeave:()=>setShowBefore(false)},'◐ Before'),
+          layers.length>0&&h('div',{className:'tsep'}),
           selFrag&&selFragLayer&&h(Fragment,null,
             h('button',{className:'btn xs ghost',title:'Bring forward',onClick:()=>bringFwd(selFragLayer.id,selectedFragId)},'↑'),
             h('button',{className:'btn xs ghost',title:'Send back',onClick:()=>sendBck(selFragLayer.id,selectedFragId)},'↓'),

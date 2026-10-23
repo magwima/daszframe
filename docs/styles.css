@@ -210,3 +210,17 @@ canvas.curve-c{display:block;border-radius:3px;cursor:crosshair}
 .restore-bar span{flex:1;min-width:200px}
 .hint{font-size:11px;color:var(--muted);line-height:1.55;margin:4px 0 6px}
 .srow.wide .srow-label{width:92px;white-space:nowrap}
+.before-badge{position:absolute;top:10px;left:10px;font-family:var(--fm);font-size:10px;letter-spacing:.14em;color:#070707;background:var(--acc);padding:3px 7px;border-radius:2px;pointer-events:none;z-index:5;transform-origin:0 0}
+.histo{padding:8px 12px 6px;border-bottom:1px solid var(--b1);flex-shrink:0}
+.histo canvas{display:block;width:100%;height:60px;background:#0a0a0a;border-radius:3px}
+.pr.col .histo{display:none!important}
+.curve{display:block;width:100%;aspect-ratio:1;background:#0a0a0a;border-radius:3px;touch-action:none;cursor:crosshair;user-select:none}
+.curve-grid{stroke:rgba(255,255,255,.06);stroke-width:1}
+.curve-frame{fill:none;stroke:rgba(255,255,255,.12);stroke-width:1}
+.curve-diag{stroke:rgba(255,255,255,.12);stroke-width:1;stroke-dasharray:4 4}
+.curve-line{fill:none;stroke:var(--acc);stroke-width:2.2}
+.curve-pt{fill:#0a0a0a;stroke:var(--acc);stroke-width:2;cursor:grab}
+.bands{display:flex;gap:5px;flex-wrap:wrap}
+.band{width:20px;height:20px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;position:relative;box-shadow:inset 0 0 0 1px rgba(0,0,0,.3)}
+.band.on{border-color:var(--text);transform:scale(1.12)}
+.band.edited::after{content:'';position:absolute;right:-3px;top:-3px;width:6px;height:6px;border-radius:50%;background:var(--acc);border:1px solid #0a0a0a}

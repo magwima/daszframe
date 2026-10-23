@@ -165,6 +165,54 @@
     return M.map((v, i) => Id[i] + (v - Id[i]) * s);
   }
 
+  // ── Tone curve (monotone cubic through the points, 0..255) ───────────────────
+  const curveIdentity = (pts) => !pts || pts.every(([x, y]) => Math.abs(x - y) < 0.5);
+  function curveFn(pts) {
+    const P = [...(pts || [[0, 0], [255, 255]])].sort((a, b) => a[0] - b[0]);
+    const n = P.length;
+    if (n < 2) return (v) => v;
+    const xs = P.map(p => p[0]), ys = P.map(p => p[1]);
+    const d = [], m = new Array(n);
+    for (let i = 0; i < n - 1; i++) d.push((ys[i + 1] - ys[i]) / ((xs[i + 1] - xs[i]) || 1e-6));
+    m[0] = d[0]; m[n - 1] = d[n - 2];
+    for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+    for (let i = 0; i < n - 1; i++) { // Fritsch–Carlson: keep it from overshooting
+      if (d[i] === 0) { m[i] = m[i + 1] = 0; continue; }
+      const a = m[i] / d[i], b = m[i + 1] / d[i], s2 = a * a + b * b;
+      if (s2 > 9) { const t = 3 / Math.sqrt(s2); m[i] = t * a * d[i]; m[i + 1] = t * b * d[i]; }
+    }
+    return (v) => {
+      if (v <= xs[0]) return ys[0];
+      if (v >= xs[n - 1]) return ys[n - 1];
+      let i = 0; while (v > xs[i + 1]) i++;
+      const h = xs[i + 1] - xs[i], t = (v - xs[i]) / h, t2 = t * t, t3 = t2 * t;
+      return (2 * t3 - 3 * t2 + 1) * ys[i] + (t3 - 2 * t2 + t) * h * m[i] + (-2 * t3 + 3 * t2) * ys[i + 1] + (t3 - t2) * h * m[i + 1];
+    };
+  }
+
+  // ── Colour mixer: hue / saturation / luminance per colour range ────────────
+  const MIX_BANDS = [['red', 0], ['orange', 30], ['yellow', 60], ['green', 120], ['aqua', 180], ['blue', 225], ['purple', 270], ['magenta', 315]];
+  const mixerActive = (mx) => !!mx && Object.values(mx).some(b => b && (b.h || b.s || b.l));
+  // 360-entry table of [hue shift°, sat factor−1, lum shift], interpolated
+  // between neighbouring bands so there are no hard edges between colours.
+  function mixerTable(mx) {
+    const T = new Float32Array(360 * 3);
+    for (let hdeg = 0; hdeg < 360; hdeg++) {
+      let a = MIX_BANDS.length - 1;
+      for (let i = 0; i < MIX_BANDS.length; i++) if (MIX_BANDS[i][1] <= hdeg) a = i;
+      const b = (a + 1) % MIX_BANDS.length;
+      const ca = MIX_BANDS[a][1], cb = MIX_BANDS[b][1] + (b === 0 ? 360 : 0);
+      const hh = hdeg < ca ? hdeg + 360 : hdeg;
+      const t = (hh - ca) / (cb - ca);
+      const A = mx[MIX_BANDS[a][0]] || {}, B = mx[MIX_BANDS[b][0]] || {};
+      T[hdeg * 3] = ((A.h || 0) * (1 - t) + (B.h || 0) * t) / 100 * 30;
+      T[hdeg * 3 + 1] = ((A.s || 0) * (1 - t) + (B.s || 0) * t) / 100;
+      T[hdeg * 3 + 2] = ((A.l || 0) * (1 - t) + (B.l || 0) * t) / 100;
+    }
+    return T;
+  }
+  function hue2rgb(p, q, t) { if (t < 0) t += 1; if (t > 1) t -= 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; }
+
   // ── Grade ───────────────────────────────────────────────────────────────────
   const TONE_KEYS = ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'lift'];
   function needsColor(g) {
@@ -172,6 +220,7 @@
     if (TONE_KEYS.some(k => g[k])) return true;
     if ((g.gamma || 1) !== 1 || (g.gain || 1) !== 1) return true;
     if (g.saturation || g.vibrance || g.temperature || g.tint) return true;
+    if (mixerActive(g.mixer) || !curveIdentity(g.curvePoints)) return true;
     if (g.look && g.look !== 'none' && (g.lookStrength ?? 100) > 0) return true;
     if (g.lutData && g.lutData.data && g.lutData.data.length) return true;
     return false;
@@ -195,6 +244,10 @@
       v += bl * 0.15 * (1 - smooth(0, 0.3, v));
       t[i] = clamp(v, 0, 1);
     }
+    if (!curveIdentity(g.curvePoints)) {
+      const f = curveFn(g.curvePoints);
+      for (let i = 0; i < 256; i++) t[i] = clamp(f(t[i] * 255) / 255, 0, 1);
+    }
     return t;
   }
   const _lutFlat = new WeakMap();
@@ -214,6 +267,7 @@
     const temp = (g.temperature || 0) / 100, tint = (g.tint || 0) / 100;
     const sat = 1 + (g.saturation || 0) / 100, vib = (g.vibrance || 0) / 100;
     const M = (g.look && g.look !== 'none') ? lookMatrix(g.look, g.lookStrength) : null;
+    const MX = mixerActive(g.mixer) ? mixerTable(g.mixer) : null;
     const lut = g.lutData && g.lutData.data && g.lutData.data.length ? g.lutData : null;
     const L = lut ? lutFlat(lut) : null, S = lut ? lut.size : 0, S1 = S - 1;
     const n = L ? Math.min(S * S * S, L.length / 3) : 0;
@@ -231,6 +285,22 @@
           s *= 1 + vib * (1 - clamp(mx - mn, 0, 1));
         }
         r = lm + (r - lm) * s; gg = lm + (gg - lm) * s; b = lm + (b - lm) * s;
+      }
+      if (MX) { // colour mixer, in HSL
+        const R0 = clamp(r, 0, 1), G0 = clamp(gg, 0, 1), B0 = clamp(b, 0, 1);
+        const mx = Math.max(R0, G0, B0), mn = Math.min(R0, G0, B0), c = mx - mn;
+        if (c > 0.01) {
+          let hh;
+          if (mx === R0) hh = ((G0 - B0) / c) % 6; else if (mx === G0) hh = (B0 - R0) / c + 2; else hh = (R0 - G0) / c + 4;
+          hh = (hh * 60 + 360) % 360;
+          let L = (mx + mn) / 2, S = c / (1 - Math.abs(2 * L - 1) || 1e-6);
+          const k = (Math.round(hh) % 360) * 3, wgt = Math.min(1, c * 4);
+          hh = (hh + MX[k] * wgt + 360) % 360;
+          S = clamp(S * (1 + MX[k + 1] * wgt), 0, 1);
+          L = clamp(L + MX[k + 2] * 0.22 * wgt * (1 - Math.abs(2 * L - 1)), 0, 1);
+          const q = L < 0.5 ? L * (1 + S) : L + S - L * S, p = 2 * L - q, H1 = hh / 360;
+          r = hue2rgb(p, q, H1 + 1 / 3); gg = hue2rgb(p, q, H1); b = hue2rgb(p, q, H1 - 1 / 3);
+        }
       }
       if (M) {
         const nr = M[0] * r + M[1] * gg + M[2] * b + M[3];
@@ -427,5 +497,5 @@
     return { size, data: data.slice(0, size * size * size) };
   }
 
-  global.DZ = { img, preload, layerSources, renderComposite, renderLayer, drawCover, blurredCopy, parseCube, needsColor, LOOKS };
+  global.DZ = { img, preload, layerSources, renderComposite, renderLayer, drawCover, blurredCopy, parseCube, needsColor, curveFn, curveIdentity, MIX_BANDS, LOOKS };
 })(window);

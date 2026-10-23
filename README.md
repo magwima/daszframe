@@ -20,8 +20,13 @@ By Michael Kagwima.
 - **Layers** — stack photo, collage and solid-colour layers, each with its own grade, opacity and blend mode.
 - **Film looks** — Cinematic, Vintage, B&W, Noir, Bleach Bypass, Teal & Orange, Editorial, Kodak,
   Fuji, Documentary, and a real dot-screen Halftone, each with adjustable strength.
+- **Portrait retouch** — Face Light, Eye Enhancer, Skin Smoothing and Teeth Whitening, guided by
+  the detected face so only skin, eyes and teeth are touched. On a collage, every fragment updates.
 - **Colour grading** — exposure, contrast, highlights, shadows, whites, blacks, saturation,
-  vibrance, temperature, tint, lift / gamma / gain.
+  vibrance, temperature, tint, lift / gamma / gain, a draggable **Tone Curve**, and a
+  **Color Mixer** (hue, saturation and luminance for 8 colour ranges).
+- **Before / after and histogram** — hold the `\` key (or the ◐ Before button) to see the original;
+  a live histogram shows when highlights or shadows are clipping.
 - **Optical FX** — vignette, film grain, chromatic aberration, blur, glow, clarity, sharpness.
 - **LUTs** — import any 3D `.cube` LUT.
 - **Export** — PNG or JPG at 1×, 2× or 4× (up to 3416 px). Exports render from the full-resolution
@@ -44,6 +49,7 @@ Badges can be moved, resized and labelled, then exported as PNG.
 | `docs/app.js` | User interface (React, no build step). |
 | `docs/js/engine.js` | Renderer shared by the live preview and export. |
 | `docs/js/faces.js` | In-browser face detection and fragment regions. |
+| `docs/js/portrait.js` | Face-guided retouch (light, eyes, skin, teeth). |
 | `docs/js/store.js` | Project files and autosave (IndexedDB). |
 | `docs/vendor/face-api/` | [face-api](https://github.com/vladmandic/face-api) (MIT) and its two models (~2 MB, loaded only when you make a collage). |
 | `extension/` | Chrome extension shell (manifest, background script, icons) and its build script. |
