@@ -1,8 +1,8 @@
-/* DASZFRAME Photo Studio v4.0
-   Removed: video export, animation timeline, Daszage
-   Added: Spotlight Image Selector
-   Multiple photo layers · per-layer styles · cinematic grades · color grading
-   LUT support · curves · film looks · effects */
+/* DASZFRAME Photo Studio v5.0 — UI (app.js)
+   Studio: multi-layer photo editor · face-fragment collages · film looks ·
+   colour grading · .cube LUTs · optical FX.  Spotlight: detail badges.
+   Rendering lives in js/engine.js (shared by preview and export), face
+   detection in js/faces.js, project files and autosave in js/store.js. */
 'use strict';
 const {createElement:h,useState,useRef,useEffect,useCallback,useMemo,Fragment}=React;
 
@@ -32,6 +32,7 @@ const FILM_LOOKS=[
   {id:'halftone',  name:'Halftone',      sub:'Print effect · graphic'},
 ];
 
+// Fallback regions, used only when no face is detected in the photo.
 const FACE_REGIONS=[
   {id:'leftEye',   label:'Left Eye',   area:{x:.18,y:.26,w:.24,h:.16}},
   {id:'rightEye',  label:'Right Eye',  area:{x:.58,y:.26,w:.24,h:.16}},
@@ -50,17 +51,6 @@ const FACE_REGIONS=[
 
 const BLEND_MODES=['normal','multiply','screen','overlay','darken','lighten','color-dodge','color-burn','hard-light','soft-light','difference','exclusion','hue','saturation','color','luminosity'];
 
-// Depth (world z; larger = farther from camera) per face region, for the 3D
-// dolly-zoom. Eyes sit on the focus plane; nose nearest; halves/strips behind.
-const FOCUS_Z=10;
-const FACE_DEPTH={
-  'Nose':7.5,'Mouth':9,'Chin':9.4,
-  'Left Eye':10,'Right Eye':10,
-  'Left Cheek':10.6,'Right Cheek':10.6,'Forehead':10.9,
-  'Left Half':12,'Right Half':12,
-  'Top Strip':12.6,'Mid Strip':11.5,'Bot Strip':12.6,
-};
-
 const CANVAS_SIZES=[
   {id:'sq_sm',label:'Square SM',  w:480, h:480},
   {id:'sq_md',label:'Square MD',  w:640, h:640},
@@ -70,7 +60,8 @@ const CANVAS_SIZES=[
   {id:'land', label:'Landscape',  w:854, h:480},
 ];
 
-const AI_QUICK=[
+// One-click presets: a film look plus (for collages) a layout.
+const STYLE_PRESETS=[
   {id:'museum',  icon:'🏛',label:'Museum',    look:'cinematic',layout:'gallery'},
   {id:'fashion', icon:'✦', label:'Fashion',   look:'editorial', layout:'editorial'},
   {id:'noir',    icon:'◼', label:'Noir',      look:'noir',      layout:'dasz'},
@@ -103,246 +94,27 @@ const defaultGrade=()=>({
 const uid=()=>Math.random().toString(36).slice(2,9);
 const tick=()=>new Promise(r=>setTimeout(r,16));
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-const lerp=(a,b,t)=>a+(b-a)*t;
 
-function extractFragment(imgEl,region,size=400){
-  const c=document.createElement('canvas');c.width=size;c.height=size;
-  c.getContext('2d').drawImage(imgEl,region.x*imgEl.naturalWidth,region.y*imgEl.naturalHeight,
-    region.w*imgEl.naturalWidth,region.h*imgEl.naturalHeight,0,0,size,size);
-  return c.toDataURL('image/jpeg',.92);
-}
-const extractThumb=(imgEl,region)=>extractFragment(imgEl,region,80);
-
-// Serialize a loaded <img> to a data URL so projects survive a page reload
-// (blob: URLs do not). JPEG keeps file size reasonable; PNG would be huge.
-function imgElToDataURL(imgEl,mime,q){
-  if(!imgEl||!imgEl.naturalWidth) return null;
-  const c=document.createElement('canvas');
-  c.width=imgEl.naturalWidth;c.height=imgEl.naturalHeight;
-  c.getContext('2d').drawImage(imgEl,0,0);
-  try{return c.toDataURL(mime||'image/jpeg',q!=null?q:0.9);}catch(_){return null;}
+// Cut a region out of the source photo at its real shape and full resolution
+// (long side capped at 1600px), plus a small thumbnail. `ar` is width/height.
+const FRAG_MAX=1600,THUMB_MAX=140;
+function extractRegion(imgEl,area){
+  const W=imgEl.naturalWidth,H=imgEl.naturalHeight;
+  const sx=area.x*W,sy=area.y*H,sw=Math.max(1,area.w*W),sh=Math.max(1,area.h*H);
+  const cut=(max)=>{
+    const k=Math.min(1,max/Math.max(sw,sh));
+    const c=document.createElement('canvas');c.width=Math.max(1,Math.round(sw*k));c.height=Math.max(1,Math.round(sh*k));
+    const x=c.getContext('2d');x.imageSmoothingQuality='high';
+    x.drawImage(imgEl,sx,sy,sw,sh,0,0,c.width,c.height);
+    return c.toDataURL('image/jpeg',.92);
+  };
+  return{dataUrl:cut(FRAG_MAX),thumb:cut(THUMB_MAX),ar:sw/sh};
 }
 
-// ── Film look → CSS filter string ────────────────────────────────────────────
-function lookToFilter(look){
-  switch(look){
-    case 'cinematic':  return 'contrast(1.18) saturate(.72) brightness(.95)';
-    case 'vintage':    return 'sepia(.45) brightness(1.08) contrast(.92) saturate(.85)';
-    case 'bw':         return 'grayscale(1) contrast(1.15)';
-    case 'noir':       return 'grayscale(1) contrast(1.45) brightness(.82)';
-    case 'bleach':     return 'contrast(1.35) saturate(.38) brightness(1.05)';
-    case 'teal':       return 'contrast(1.12) saturate(1.2) hue-rotate(8deg) brightness(.97)';
-    case 'editorial':  return 'contrast(1.06) brightness(1.04) saturate(.88)';
-    case 'kodak':      return 'sepia(.22) contrast(1.08) saturate(1.12) brightness(1.02)';
-    case 'fuji':       return 'contrast(1.05) saturate(.95) brightness(1.02) hue-rotate(-5deg)';
-    case 'documentary':return 'contrast(1.04) saturate(.82) brightness(.98)';
-    case 'halftone':   return 'contrast(2.2) grayscale(1)';
-    default: return 'none';
-  }
-}
-
-// ── Grade → CSS filter (real-time preview via CSS) ────────────────────────────
-function gradeToFilter(g){
-  if(!g) return 'none';
-  const br=clamp(1+(g.exposure||0)/100,.1,3);
-  const ct=clamp(1+(g.contrast||0)/100,.1,3);
-  const sat=clamp(1+(g.saturation||0)/100,0,3);
-  const lkF=g.look&&g.look!=='none'?lookToFilter(g.look):'';
-  let f=`brightness(${br}) contrast(${ct}) saturate(${sat})`;
-  if(g.temperature>0) f+=` sepia(${g.temperature*.003})`;
-  if(g.temperature<0) f+=` hue-rotate(${g.temperature*.1}deg)`;
-  if(g.blur>0) f+=` blur(${g.blur*.04}px)`;
-  return f.trim();
-}
-
-// ── Apply pixel-level grade to canvas (for export) ───────────────────────────
-function applyGradePixels(ctx,W,H,g){
-  if(!g||!W||!H) return;
-  const id=ctx.getImageData(0,0,W,H);
-  const d=id.data;
-  const exp=Math.pow(2,(g.exposure||0)/100);
-  const gamma=g.gamma||1;
-  const lift=(g.lift||0)/255;
-  const gain=g.gain||1;
-  const sat=(g.saturation||0)/100;
-  const temp=(g.temperature||0)/100;
-  const tint=(g.tint||0)/100;
-  const hi=(g.highlights||0)/100;
-  const sh=(g.shadows||0)/100;
-  // Build lookup tables for performance
-  const lut=new Uint8Array(256);
-  for(let i=0;i<256;i++){
-    let v=i/255;
-    v=Math.pow(v,1/gamma);
-    v=v*gain+lift;
-    v=v*exp;
-    // Highlights/shadows
-    if(v>.5) v=v+hi*(1-v)*2;
-    else v=v+sh*v*2;
-    lut[i]=clamp(Math.round(v*255),0,255);
-  }
-  for(let i=0;i<d.length;i+=4){
-    let r=lut[d[i]],gv=lut[d[i+1]],b=lut[d[i+2]];
-    // Saturation
-    if(sat!==0){const lm=.299*r+.587*gv+.114*b;r=clamp(lm+(r-lm)*(1+sat),0,255);gv=clamp(lm+(gv-lm)*(1+sat),0,255);b=clamp(lm+(b-lm)*(1+sat),0,255);}
-    // Temperature (warm/cool)
-    if(temp>0){r=clamp(r+temp*30,0,255);b=clamp(b-temp*20,0,255);}
-    else if(temp<0){b=clamp(b-temp*30,0,255);r=clamp(r+temp*20,0,255);}
-    // Tint (green ↔ magenta). +tint = magenta (less green), −tint = green (more green)
-    if(tint!==0) gv=clamp(gv-tint*20,0,255);
-    d[i]=r;d[i+1]=gv;d[i+2]=b;
-  }
-  ctx.putImageData(id,0,0);
-}
-
-// ── Vignette overlay ─────────────────────────────────────────────────────────
-function drawVignette(ctx,W,H,strength){
-  if(!strength) return;
-  const grad=ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*.3,W/2,H/2,Math.max(W,H)*.75);
-  grad.addColorStop(0,'rgba(0,0,0,0)');
-  grad.addColorStop(1,`rgba(0,0,0,${strength/100})`);
-  ctx.save();ctx.globalCompositeOperation='multiply';
-  ctx.fillStyle=grad;ctx.fillRect(0,0,W,H);ctx.restore();
-}
-
-// ── Film grain overlay ────────────────────────────────────────────────────────
-function drawGrain(ctx,W,H,amount){
-  if(!amount) return;
-  const id=ctx.getImageData(0,0,W,H);const d=id.data;
-  const a=amount/100;
-  for(let i=0;i<d.length;i+=4){const n=(Math.random()-.5)*a*80;d[i]=clamp(d[i]+n,0,255);d[i+1]=clamp(d[i+1]+n,0,255);d[i+2]=clamp(d[i+2]+n,0,255);}
-  ctx.putImageData(id,0,0);
-}
-
-// ── Chromatic aberration ──────────────────────────────────────────────────────
-function drawChromAb(ctx,W,H,amount){
-  if(!amount||amount<1) return;
-  const off=Math.round(amount*.5);
-  const id=ctx.getImageData(0,0,W,H);
-  const out=new ImageData(W,H);
-  const s=id.data,t=out.data;
-  for(let y=0;y<H;y++){for(let x=0;x<W;x++){
-    const i=(y*W+x)*4;
-    const ri=Math.min((y*W+Math.min(x+off,W-1))*4,s.length-4);
-    const bi=Math.min((y*W+Math.max(x-off,0))*4,s.length-4);
-    t[i]=s[ri];t[i+1]=s[i+1];t[i+2]=s[bi+2];t[i+3]=s[i+3];
-  }}
-  ctx.putImageData(out,0,0);
-}
-
-// ── Glow effect ───────────────────────────────────────────────────────────────
-function drawGlow(ctx,W,H,amount){
-  if(!amount) return;
-  ctx.save();ctx.globalCompositeOperation='screen';ctx.globalAlpha=amount/200;
-  ctx.filter=`blur(${amount*.3}px)`;ctx.drawImage(ctx.canvas,0,0,W,H);
-  ctx.filter='none';ctx.restore();
-}
-
-// ── LUT parser (.cube) ────────────────────────────────────────────────────────
-function parseCube(text){
-  const lines=text.split('\n').filter(l=>l.trim()&&!l.startsWith('#'));
-  let size=17;const data=[];
-  for(const line of lines){
-    if(line.startsWith('LUT_3D_SIZE')){size=parseInt(line.split(' ')[1]);continue;}
-    const vals=line.trim().split(/\s+/).map(Number);
-    if(vals.length===3&&!isNaN(vals[0])) data.push(vals);
-  }
-  return{size,data};
-}
-function applyLUT(ctx,W,H,lut){
-  if(!lut||!lut.data||!lut.data.length) return;
-  const id=ctx.getImageData(0,0,W,H);const d=id.data;
-  const s=lut.size;
-  for(let i=0;i<d.length;i+=4){
-    const r=d[i]/255*(s-1),g=d[i+1]/255*(s-1),b=d[i+2]/255*(s-1);
-    const ri=Math.floor(r),gi=Math.floor(g),bi=Math.floor(b);
-    const rf=r-ri,gf=g-gi,bf=b-bi;
-    const idx=(bi*s*s+gi*s+ri);
-    if(idx<lut.data.length){
-      const [nr,ng,nb]=lut.data[Math.min(idx,lut.data.length-1)];
-      d[i]=clamp(Math.round(nr*255),0,255);
-      d[i+1]=clamp(Math.round(ng*255),0,255);
-      d[i+2]=clamp(Math.round(nb*255),0,255);
-    }
-  }
-  ctx.putImageData(id,0,0);
-}
-
-// ── Decoded-image cache (avoids re-decoding fragment dataURLs every frame) ────
-const _imgCache=new Map();
-function getImg(src){
-  return new Promise(res=>{
-    if(!src){res(null);return;}
-    const c=_imgCache.get(src);
-    if(c){res(c);return;}
-    const img=new Image();
-    img.onload=()=>{_imgCache.set(src,img);res(img);};
-    img.onerror=()=>res(null);
-    img.src=src;
-  });
-}
-
-// ── Unified compositor — single source of truth for still + video export ──────
-// Draws all visible layers onto ctx at `scale`, at animation time `timeMs`.
-// Mirrors the on-canvas preview (grade + look via canvas filter) and adds the
-// export-only optical FX. Fixes vs. the old exporter: collage/solid layers are
-// now graded & drawn, photo layer transform (x/y/w/h/rotation) is honoured, and
-// per-fragment animation is applied.
-async function drawComposite(ctx,scale,layers,opts){
-  const {CW,CH,bgColor,timeMs=0}=opts;
-  ctx.save();
-  ctx.setTransform(scale,0,0,scale,0,0);
-  ctx.fillStyle=bgColor;ctx.fillRect(0,0,CW,CH);
-
-  const vis=layers.filter(l=>l.visible!==false);
-  for(const l of vis){
-    const g=l.grade||defaultGrade();
-    const combined=[gradeToFilter(g),(g.look&&g.look!=='none')?lookToFilter(g.look):'']
-      .filter(s=>s&&s!=='none').join(' ')||'none';
-
-    const lc=document.createElement('canvas');lc.width=CW;lc.height=CH;
-    const lctx=lc.getContext('2d');
-
-    if(l.type==='photo'&&l.imgEl){
-      lctx.save();lctx.filter=combined;
-      const x=l.x||0,y=l.y||0,w=l.w||CW,hh=l.h||CH,cx=x+w/2,cy=y+hh/2;
-      lctx.translate(cx,cy);lctx.rotate((l.rotation||0)*Math.PI/180);
-      lctx.drawImage(l.imgEl,-w/2,-hh/2,w,hh);
-      lctx.restore();
-    } else if(l.type==='solid'){
-      lctx.fillStyle=g.solidColor||'#444';lctx.fillRect(0,0,CW,CH);
-    } else if(l.type==='collage'){
-      let frags=(l.placed||[]).filter(f=>f.visible).sort((a,b)=>a.zIndex-b.zIndex);
-      const fc=document.createElement('canvas');fc.width=CW;fc.height=CH;
-      const fctx=fc.getContext('2d');
-      for(const f of frags){
-        const img=await getImg(f.dataUrl);
-        if(!img) continue;
-        fctx.save();fctx.globalAlpha=f.opacity;
-        const cx=f.x+f.w/2,cy=f.y+f.h/2;
-        fctx.translate(cx,cy);fctx.rotate((f.rotation||0)*Math.PI/180);
-        if(f.flipped) fctx.scale(-1,1);
-        if(f.borderRadius>0){fctx.beginPath();fctx.roundRect(-f.w/2,-f.h/2,f.w,f.h,f.borderRadius);fctx.clip();}
-        fctx.drawImage(img,-f.w/2,-f.h/2,f.w,f.h);
-        fctx.restore();
-      }
-      lctx.filter=combined;lctx.drawImage(fc,0,0);lctx.filter='none';
-    } else { continue; }
-
-    // Export-only optical FX (post-grade, per layer)
-    if(g.lutData) applyLUT(lctx,CW,CH,g.lutData);
-    if(g.vignette) drawVignette(lctx,CW,CH,g.vignette);
-    if(g.grain)    drawGrain(lctx,CW,CH,g.grain);
-    if(g.chromAb)  drawChromAb(lctx,CW,CH,g.chromAb);
-    if(g.glow>0)   drawGlow(lctx,CW,CH,g.glow);
-
-    ctx.save();
-    ctx.globalAlpha=(g.opacity??100)/100;
-    ctx.globalCompositeOperation=(g.blendMode&&g.blendMode!=='normal')?g.blendMode:'source-over';
-    ctx.drawImage(lc,0,0);
-    ctx.restore();
-  }
-  ctx.restore();
+// Fit a box of aspect `ar` inside a `size`×`size` square (or w×h box).
+function fitBox(ar,w,h=w){
+  ar=ar||1;
+  return (w/h>ar)?{w:h*ar,h}:{w,h:w/ar};
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -364,31 +136,35 @@ function composeDasz(fragments,cw,ch){
 function composeLayout(fragments,mode,cw,ch){
   if(mode==='dasz') return composeDasz(fragments,cw,ch);
   const n=fragments.length;const placed=[];
+  const rnd=(a,b)=>a+Math.random()*(b-a);
+  const put=(f,x,y,box,extra)=>placed.push({...f,id:uid(),x,y,w:box.w,h:box.h,...extra});
   if(mode==='mosaic'){
     const cols=Math.ceil(Math.sqrt(n)),rows=Math.ceil(n/cols);const cW=cw/cols,cH=ch/rows;
-    fragments.forEach((f,i)=>{const sc=.82+Math.random()*.22,w=cW*sc,hh=cH*sc,col=i%cols,row=Math.floor(i/cols);
-      placed.push({...f,id:uid(),x:col*cW+(cW-w)/2,y:row*cH+(cH-hh)/2,w,h:hh,rotation:(Math.random()-.5)*10,zIndex:i});});
+    fragments.forEach((f,i)=>{const sc=rnd(.82,1.04),b=fitBox(f.ar,cW*sc,cH*sc),col=i%cols,row=Math.floor(i/cols);
+      put(f,col*cW+(cW-b.w)/2,row*cH+(cH-b.h)/2,b,{rotation:rnd(-5,5),zIndex:i});});
   } else if(mode==='editorial'){
-    const cx=cw/2,cy=ch/2;
-    fragments.forEach((f,i)=>{const a=(i/n)*Math.PI*2-Math.PI/2,r=Math.min(cw,ch)*.28,sz=75+Math.random()*110;
-      placed.push({...f,id:uid(),x:cx+Math.cos(a)*r-sz/2,y:cy+Math.sin(a)*r-sz/2,w:sz,h:sz,rotation:(Math.random()-.5)*22,zIndex:i});});
+    const cx=cw/2,cy=ch/2,k=Math.min(cw,ch)/640;
+    fragments.forEach((f,i)=>{const a=(i/n)*Math.PI*2-Math.PI/2,r=Math.min(cw,ch)*.28,b=fitBox(f.ar,rnd(95,190)*k);
+      put(f,cx+Math.cos(a)*r-b.w/2,cy+Math.sin(a)*r-b.h/2,b,{rotation:rnd(-11,11),zIndex:i});});
   } else if(mode==='cubist'){
-    fragments.forEach((f,i)=>{const sz=65+Math.random()*160;
-      placed.push({...f,id:uid(),x:Math.random()*(cw-sz),y:Math.random()*(ch-sz),w:sz,h:sz,rotation:(Math.random()-.5)*50,zIndex:i});});
+    const k=Math.min(cw,ch)/640;
+    fragments.forEach((f,i)=>{const b=fitBox(f.ar,rnd(80,220)*k);
+      put(f,rnd(0,Math.max(0,cw-b.w)),rnd(0,Math.max(0,ch-b.h)),b,{rotation:rnd(-25,25),zIndex:i});});
   } else if(mode==='symmetry'){
-    const half=Math.ceil(n/2);
-    fragments.slice(0,half).forEach((f,i)=>{const yp=(i/half)*ch*.85+ch*.05,sz=72+Math.random()*80;
-      placed.push({...f,id:uid(),x:cw*.06,y:yp,w:sz,h:sz,rotation:0,zIndex:i});
-      placed.push({...fragments[i%n],id:uid(),x:cw*.94-sz,y:yp,w:sz,h:sz,rotation:0,flipped:true,zIndex:i+half});});
+    const half=Math.ceil(n/2),slot=ch*.9/half;
+    fragments.slice(0,half).forEach((f,i)=>{const yp=i*slot+ch*.05,b=fitBox(f.ar,Math.min(cw*.4,slot*1.6),slot*.92);
+      put(f,cw*.06,yp,b,{rotation:0,zIndex:i});
+      put(f,cw*.94-b.w,yp,b,{rotation:0,flipped:true,zIndex:i+half});});
   } else if(mode==='gallery'){
-    const ms=Math.min(cw,ch)*.52;
-    placed.push({...fragments[0],id:uid(),x:cw/2-ms/2,y:ch/2-ms/2,w:ms,h:ms,rotation:0,zIndex:10});
-    const pos=[[.04,.04],[.72,.04],[.04,.72],[.72,.72],[.38,.02],[.38,.86],[.02,.38],[.86,.38],[.20,.02],[.58,.02]];
-    fragments.slice(1).forEach((f,i)=>{const sz=50+Math.random()*60,[px,py]=pos[i%pos.length];
-      placed.push({...f,id:uid(),x:px*cw,y:py*ch,w:sz,h:sz,rotation:(Math.random()-.5)*18,zIndex:i});});
+    const k=Math.min(cw,ch)/640,main=fitBox(fragments[0]?.ar,Math.min(cw,ch)*.52);
+    put(fragments[0],cw/2-main.w/2,ch/2-main.h/2,main,{rotation:0,zIndex:20});
+    const pos=[[.04,.04],[.72,.04],[.04,.72],[.72,.72],[.38,.02],[.38,.86],[.02,.38],[.86,.38],[.20,.02],[.58,.02],[.20,.86],[.58,.86]];
+    fragments.slice(1).forEach((f,i)=>{const b=fitBox(f.ar,rnd(70,120)*k),[px,py]=pos[i%pos.length];
+      put(f,Math.min(px*cw,cw-b.w),Math.min(py*ch,ch-b.h),b,{rotation:rnd(-9,9),zIndex:i});});
   } else {
-    fragments.forEach((f,i)=>{const sz=45+Math.random()*210;
-      placed.push({...f,id:uid(),x:Math.random()*(cw-sz),y:Math.random()*(ch-sz),w:sz,h:sz,rotation:(Math.random()-.5)*65,zIndex:i});});
+    const k=Math.min(cw,ch)/640;
+    fragments.forEach((f,i)=>{const b=fitBox(f.ar,rnd(60,260)*k);
+      put(f,rnd(0,Math.max(0,cw-b.w)),rnd(0,Math.max(0,ch-b.h)),b,{rotation:rnd(-32,32),zIndex:i});});
   }
   return placed;
 }
@@ -1088,9 +864,12 @@ function App(){
 
   // ── Photo layers (multi-photo) ────────────────────────────────────────────
   // Each layer: {id, name, type:'photo'|'collage'|'solid', srcUrl, imgEl,
-  //              fragments:[], placed:[], grade:{...}, x,y,w,h,
-  //              blendMode, opacity, visible, locked}
-  const [layers,setLayers]=useState([]);
+  //              fragments:[], placed:[], grade:{...}, x,y,w,h, rotation,
+  //              visible, locked}
+  // Layers are always updated immutably, so an undo snapshot is just the old
+  // array — no deep copy, and loaded photos (imgEl) survive undo/redo.
+  const [layers,setLayersState]=useState([]);
+  const layersRef=useRef(layers);
   const [activeLayerId,setActiveLayerId]=useState(null);
   const [selectedFragId,setSelectedFragId]=useState(null);
 
@@ -1106,64 +885,67 @@ function App(){
   const [lastSaved,setLastSaved]=useState(null);
   const [exportFilename,setExportFilename]=useState('');
   const [showSaveAs,setShowSaveAs]=useState(false);
+  const [restoreOffer,setRestoreOffer]=useState(null);
   const openProjRef=useRef(null);
+  const srcDataCache=useRef(new WeakMap());
 
   // ── UI ─────────────────────────────────────────────────────────────────────
   const [leftOpen,setLeftOpen]=useState(true);
   const [rightOpen,setRightOpen]=useState(true);
   const [viewMode,setViewMode]=useState('split');
-  const [rtab,setRtab]=useState('layers');
-  const [ltab,setLtab]=useState('tools');
+  const [rtab,setRtab]=useState('looks');
   const [isProc,setIsProc]=useState(false);
   const [procMsg,setProcMsg]=useState('');
-  const [aiNote,setAiNote]=useState('');
+  const [statusNote,setStatusNote]=useState('');
   const [showExport,setShowExport]=useState(false);
   const [showVars,setShowVars]=useState(false);
   const [variations,setVariations]=useState([]);
   const [snapGrid,setSnapGrid]=useState(false);
+  const [zoom,setZoom]=useState(1);
   const GRID=20;
 
-  // ── Undo/Redo ──────────────────────────────────────────────────────────────
-  const [history,setHistory]=useState([]);
-  const [histIdx,setHistIdx]=useState(-1);
-  const skipHist=useRef(false);
-  const pushHist=useCallback((newLayers)=>{
-    if(skipHist.current) return;
-    setHistory(prev=>[...prev.slice(0,histIdx+1),JSON.parse(JSON.stringify(newLayers))].slice(-25));
-    setHistIdx(p=>Math.min(p+1,24));
-  },[histIdx]);
+  const cs=CANVAS_SIZES.find(s=>s.id===canvasSizeId)||CANVAS_SIZES[1];
+  const CW=cs.w,CH=cs.h;
+
+  // ── Undo / redo ────────────────────────────────────────────────────────────
+  // commit(fn,key): apply a change and record it. Changes with the same key
+  // within 700ms (e.g. one slider drag) merge into a single undo step.
+  const hist=useRef({stack:[[]],idx:0,key:null,t:0});
+  const [,setHistVer]=useState(0);
+  const setLive=useCallback((fn)=>{
+    const next=typeof fn==='function'?fn(layersRef.current):fn;
+    layersRef.current=next;setLayersState(next);return next;
+  },[]);
+  const record=useCallback((next,key)=>{
+    const H=hist.current,now=Date.now();
+    if(key&&key===H.key&&now-H.t<700&&H.idx===H.stack.length-1){H.stack[H.idx]=next;}
+    else{H.stack=H.stack.slice(0,H.idx+1);H.stack.push(next);if(H.stack.length>50)H.stack.shift();H.idx=H.stack.length-1;}
+    H.key=key||null;H.t=now;setHistVer(v=>v+1);
+  },[]);
+  const commit=useCallback((fn,key)=>{const next=setLive(fn);record(next,key);return next;},[setLive,record]);
+  const endGesture=useCallback(()=>{hist.current.key=null;},[]);
+  const undo=useCallback(()=>{const H=hist.current;if(H.idx>0){H.idx--;H.key=null;setLive(H.stack[H.idx]);setHistVer(v=>v+1);}},[setLive]);
+  const redo=useCallback(()=>{const H=hist.current;if(H.idx<H.stack.length-1){H.idx++;H.key=null;setLive(H.stack[H.idx]);setHistVer(v=>v+1);}},[setLive]);
+  const resetHistory=useCallback((ls)=>{hist.current={stack:[ls],idx:0,key:null,t:0};setHistVer(v=>v+1);},[]);
 
   // Drag state
   const [dragState,setDragState]=useState(null);
   const overlayRef=useRef(null);
-  const layersRef=useRef(layers);
-  useEffect(()=>{layersRef.current=layers;},[layers]);
   const fileInputRef=useRef(null);
   const lutInputRef=useRef(null);
-
-  const cs=CANVAS_SIZES.find(s=>s.id===canvasSizeId)||CANVAS_SIZES[1];
-  const CW=cs.w,CH=cs.h;
 
   // Active layer helper
   const activeLayer=useMemo(()=>layers.find(l=>l.id===activeLayerId),[layers,activeLayerId]);
   const activeGrade=activeLayer?.grade||defaultGrade();
 
-  // ── Update layer ───────────────────────────────────────────────────────────
+  // ── Update helpers ─────────────────────────────────────────────────────────
   const updateLayer=useCallback((id,upd)=>{
-    setLayers(prev=>{
-      const next=prev.map(l=>l.id===id?{...l,...upd}:l);
-      pushHist(next);return next;
-    });
-  },[pushHist]);
-
+    commit(prev=>prev.map(l=>l.id===id?{...l,...upd}:l),'L'+id+Object.keys(upd).join());
+  },[commit]);
   const updateGrade=useCallback((id,gradeUpd)=>{
-    setLayers(prev=>{
-      const next=prev.map(l=>l.id===id?{...l,grade:{...(l.grade||defaultGrade()),...gradeUpd}}:l);
-      return next; // Don't push history on every slider move
-    });
-  },[]);
-
-  const commitGrade=useCallback(()=>{pushHist(layersRef.current);},[pushHist]);
+    commit(prev=>prev.map(l=>l.id===id?{...l,grade:{...(l.grade||defaultGrade()),...gradeUpd}}:l),'G'+id+Object.keys(gradeUpd).join());
+  },[commit]);
+  const commitGrade=endGesture;
 
   // ── Add photo layer ────────────────────────────────────────────────────────
   const addPhotoLayer=useCallback(async(file,asCollage=false)=>{
@@ -1180,280 +962,290 @@ function App(){
     }
     const name=file.name.replace(/\.[^.]+$/,'').slice(0,24);
 
-    let frags=[],placed=[];
+    let frags=[],placed=[],note='';
     if(asCollage){
-      setProcMsg('Extracting face regions…');
-      await tick();
-      frags=FACE_REGIONS.map(r=>({
-        id:uid(),label:r.label,
-        thumb:extractThumb(img,r.area),
-        dataUrl:extractFragment(img,r.area,400),
+      let regions=FACE_REGIONS;
+      setProcMsg('Finding the face…');await tick();
+      try{
+        const found=await window.DZFaces.detect(img);
+        if(found){
+          regions=window.DZFaces.regionsFromLandmarks(found.points,img.naturalWidth,img.naturalHeight);
+          note=found.faces>1?`Found ${found.faces} faces, so the largest one was used.`:'Face found. Fragments follow the eyes, nose and mouth.';
+        } else note='No face found, so standard portrait crops were used. A clear, front-facing face works best.';
+      }catch(err){
+        console.warn('Face detection unavailable:',err);
+        note='Face detection could not load, so standard portrait crops were used.';
+      }
+      setProcMsg('Cutting fragments…');await tick();
+      frags=regions.map(r=>({
+        id:uid(),label:r.label,...extractRegion(img,r.area),
         visible:true,locked:false,opacity:1,style:'original',flipped:false,
       }));
       placed=composeLayout(frags,layoutMode,CW,CH);
     }
 
+    // Photo layers keep their shape: scaled to cover the canvas, centred.
+    const k=Math.max(CW/img.naturalWidth,CH/img.naturalHeight);
+    const w=img.naturalWidth*k,hh=img.naturalHeight*k;
     const newLayer={
       id:uid(),name,type:asCollage?'collage':'photo',
       srcUrl:url,imgEl:img,
       fragments:frags,placed,
-      x:0,y:0,w:CW,h:CH,
+      x:(CW-w)/2,y:(CH-hh)/2,w,h:hh,rotation:0,
       grade:defaultGrade(),
       visible:true,locked:false,
     };
-    setLayers(prev=>{const next=[...prev,newLayer];pushHist(next);return next;});
+    commit(prev=>[...prev,newLayer]);
     setActiveLayerId(newLayer.id);
     setIsProc(false);
+    setStatusNote(note);
+  },[layoutMode,CW,CH,commit]);
 
-    // Get AI note for new layer
-    try{
-      const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:120,
-          messages:[{role:'user',content:`Photo editor. New ${asCollage?'collage':'photo'} layer: "${name}". Suggest a film look and one-sentence creative direction.`}]})});
-      const d=await res.json();if(d.content?.[0]?.text) setAiNote(d.content[0].text);
-    }catch(_){}
-  },[layoutMode,CW,CH,pushHist]);
+  // ── Collage layout ────────────────────────────────────────────────────────
+  const recompose=useCallback((mode=layoutMode)=>{
+    const l=layersRef.current.find(x=>x.id===activeLayerId);
+    if(!l||l.type!=='collage'||!l.fragments.length) return;
+    commit(prev=>prev.map(x=>x.id===l.id?{...x,placed:composeLayout(x.fragments,mode,CW,CH)}:x));
+  },[activeLayerId,layoutMode,CW,CH,commit]);
+  const chooseLayout=useCallback((mode)=>{setLayoutMode(mode);recompose(mode);},[recompose]);
 
-  // ── Recompose active collage layer ────────────────────────────────────────
-  const recompose=useCallback(()=>{
-    if(!activeLayer||activeLayer.type!=='collage'||!activeLayer.fragments.length) return;
-    const newPlaced=composeLayout(activeLayer.fragments,layoutMode,CW,CH);
-    updateLayer(activeLayer.id,{placed:newPlaced});
-  },[activeLayer,layoutMode,CW,CH,updateLayer]);
-
-  // ── Apply AI quick style to active layer ──────────────────────────────────
-  const applyQuick=useCallback(async(q)=>{
+  // ── Style presets ─────────────────────────────────────────────────────────
+  const applyPreset=useCallback((q)=>{
     if(!activeLayer) return;
-    updateGrade(activeLayer.id,{look:q.look});
-    if(activeLayer.type==='collage'){
-      setLayoutMode(q.layout);
-      const newPlaced=composeLayout(activeLayer.fragments,q.layout,CW,CH);
-      updateLayer(activeLayer.id,{placed:newPlaced});
-    }
-    setAiNote(`${q.label} style applied — ${FILM_LOOKS.find(l=>l.id===q.look)?.sub||''}`);
-  },[activeLayer,CW,CH,updateLayer,updateGrade]);
+    updateGrade(activeLayer.id,{look:q.look});endGesture();
+    if(activeLayer.type==='collage') chooseLayout(q.layout);
+    setStatusNote(`${q.label} preset: ${FILM_LOOKS.find(l=>l.id===q.look)?.name||q.look}${activeLayer.type==='collage'?` look with the ${q.layout} layout`:' look'}.`);
+  },[activeLayer,updateGrade,endGesture,chooseLayout]);
 
-  // ── Fragment drag (within collage layer) ──────────────────────────────────
-  const onFragMouseDown=useCallback((e,fragId,layerId)=>{
-    e.stopPropagation();
+  // ── Fragment drag (pointer events: mouse, pen and touch) ───────────────────
+  const toCanvas=useCallback((e)=>{
+    const r=overlayRef.current.getBoundingClientRect();
+    return{x:(e.clientX-r.left)/zoom,y:(e.clientY-r.top)/zoom};
+  },[zoom]);
+  const onFragPointerDown=useCallback((e,fragId,layerId)=>{
+    e.stopPropagation();e.preventDefault();
     setSelectedFragId(fragId);
     setActiveLayerId(layerId);
     const layer=layersRef.current.find(l=>l.id===layerId);
     const frag=layer?.placed.find(f=>f.id===fragId);
-    if(!frag||frag.locked) return;
-    const rect=overlayRef.current.getBoundingClientRect();
-    setDragState({fragId,layerId,ox:e.clientX-rect.left-frag.x,oy:e.clientY-rect.top-frag.y});
-  },[]);
+    if(!frag||frag.locked||layer.locked) return;
+    const p=toCanvas(e);
+    setDragState({fragId,layerId,ox:p.x-frag.x,oy:p.y-frag.y,moved:false});
+  },[toCanvas]);
+  useEffect(()=>{
+    if(!dragState) return;
+    const move=(e)=>{
+      const p=toCanvas(e);
+      let x=p.x-dragState.ox,y=p.y-dragState.oy;
+      if(snapGrid){x=Math.round(x/GRID)*GRID;y=Math.round(y/GRID)*GRID;}
+      dragState.moved=true;draggingRef.current=true;
+      setLive(prev=>prev.map(l=>l.id===dragState.layerId
+        ?{...l,placed:l.placed.map(f=>f.id===dragState.fragId?{...f,x,y}:f)}:l));
+    };
+    const up=()=>{
+      draggingRef.current=false;
+      if(dragState.moved) record(layersRef.current);
+      setDragState(null);
+    };
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);window.addEventListener('pointercancel',up);
+    return()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',up);};
+  },[dragState,snapGrid,toCanvas,setLive,record]);
 
-  // ── Keyframe ops (on a fragment within a layer) ─────────────────────────────
-  // A keyframe captures whichever of {x,y,rotation,scale,opacity} you choose,
-  // at time `t` (ms), with an `easing` that governs the segment leading into it.
-
-
-
-  // Frame step (when paused) — one frame = 1000/fps ms
-
-  // Playback keyboard shortcuts (ignored while typing in a field)
+  // ── Keyboard ──────────────────────────────────────────────────────────────
   useEffect(()=>{
     const isField=(el)=>el&&/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
     const onKey=(e)=>{
       if(isField(e.target)) return;
-      if(e.code==='Space'){
-        // If a button is focused, let its own activation handle Space — don't
-        // also fire the global toggle (that double-toggles and flickers).
-        if(e.target&&e.target.tagName==='BUTTON') return;
+      const mod=e.ctrlKey||e.metaKey;
+      if(mod&&e.key.toLowerCase()==='z'&&!e.shiftKey){e.preventDefault();undo();}
+      else if(mod&&(e.key.toLowerCase()==='y'||(e.key.toLowerCase()==='z'&&e.shiftKey))){e.preventDefault();redo();}
+      else if(e.key==='Escape') setSelectedFragId(null);
+      else if((e.key==='Delete'||e.key==='Backspace')&&selectedFragId){
+        const l=layersRef.current.find(x=>x.placed?.some(f=>f.id===selectedFragId));
+        if(l){e.preventDefault();deleteFrag(l.id,selectedFragId);}
       }
     };
     window.addEventListener('keydown',onKey);
     return()=>window.removeEventListener('keydown',onKey);
-  },[]);
-
-  const onMouseMove=useCallback((e)=>{
-    if(!dragState) return;
-    const rect=overlayRef.current.getBoundingClientRect();
-    let x=e.clientX-rect.left-dragState.ox;
-    let y=e.clientY-rect.top-dragState.oy;
-    if(snapGrid){x=Math.round(x/GRID)*GRID;y=Math.round(y/GRID)*GRID;}
-    setLayers(prev=>prev.map(l=>l.id===dragState.layerId
-      ?{...l,placed:l.placed.map(f=>f.id===dragState.fragId?{...f,x,y}:f)}:l));
-  },[dragState,snapGrid]);
-
-  const onMouseUp=useCallback(()=>{
-    if(dragState){ pushHist(layersRef.current); }
-    setDragState(null);
-  },[dragState,pushHist]);
-
-  // Keyboard
-  useEffect(()=>{
-    const h=(e)=>{
-      if((e.ctrlKey||e.metaKey)&&e.key==='z'&&!e.shiftKey){
-        e.preventDefault();
-        if(histIdx>0){skipHist.current=true;setLayers(history[histIdx-1].map(l=>({...l})));setHistIdx(p=>p-1);setTimeout(()=>{skipHist.current=false;},0);}
-      }
-      if((e.ctrlKey||e.metaKey)&&(e.key==='y'||(e.key==='z'&&e.shiftKey))){
-        e.preventDefault();
-        if(histIdx<history.length-1){skipHist.current=true;setLayers(history[histIdx+1].map(l=>({...l})));setHistIdx(p=>p+1);setTimeout(()=>{skipHist.current=false;},0);}
-      }
-      if(e.key==='Escape'){setSelectedFragId(null);}
-    };
-    window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
-  },[history,histIdx]);
+  });
 
   // ── Fragment ops ───────────────────────────────────────────────────────────
   const updateFrag=useCallback((layerId,fragId,upd)=>{
-    setLayers(prev=>prev.map(l=>l.id===layerId?{...l,placed:l.placed.map(f=>f.id===fragId?{...f,...upd}:f)}:l));
-  },[]);
+    commit(prev=>prev.map(l=>l.id===layerId?{...l,placed:l.placed.map(f=>f.id===fragId?{...f,...upd}:f)}:l),'F'+fragId+Object.keys(upd).join());
+  },[commit]);
   const deleteFrag=useCallback((layerId,fragId)=>{
-    setLayers(prev=>prev.map(l=>l.id===layerId?{...l,placed:l.placed.filter(f=>f.id!==fragId)}:l));
+    commit(prev=>prev.map(l=>l.id===layerId?{...l,placed:l.placed.filter(f=>f.id!==fragId)}:l));
     setSelectedFragId(null);
-  },[]);
+  },[commit]);
   const dupFrag=useCallback((layerId,frag)=>{
-    setLayers(prev=>prev.map(l=>l.id===layerId?{...l,placed:[...l.placed,{...frag,id:uid(),x:frag.x+20,y:frag.y+20,zIndex:(frag.zIndex||0)+1}]}:l));
-  },[]);
+    const nf={...frag,id:uid(),x:frag.x+20,y:frag.y+20,zIndex:(frag.zIndex||0)+1};
+    commit(prev=>prev.map(l=>l.id===layerId?{...l,placed:[...l.placed,nf]}:l));
+    setSelectedFragId(nf.id);
+  },[commit]);
   const bringFwd=useCallback((layerId,fragId)=>{
-    setLayers(prev=>prev.map(l=>{if(l.id!==layerId)return l;const mx=Math.max(...l.placed.map(f=>f.zIndex||0));return{...l,placed:l.placed.map(f=>f.id===fragId?{...f,zIndex:mx+1}:f)};}));
-  },[]);
+    commit(prev=>prev.map(l=>{if(l.id!==layerId)return l;const mx=Math.max(...l.placed.map(f=>f.zIndex||0));return{...l,placed:l.placed.map(f=>f.id===fragId?{...f,zIndex:mx+1}:f)};}));
+  },[commit]);
   const sendBck=useCallback((layerId,fragId)=>{
-    setLayers(prev=>prev.map(l=>{if(l.id!==layerId)return l;const mn=Math.min(...l.placed.map(f=>f.zIndex||0));return{...l,placed:l.placed.map(f=>f.id===fragId?{...f,zIndex:mn-1}:f)};}));
-  },[]);
+    commit(prev=>prev.map(l=>{if(l.id!==layerId)return l;const mn=Math.min(...l.placed.map(f=>f.zIndex||0));return{...l,placed:l.placed.map(f=>f.id===fragId?{...f,zIndex:mn-1}:f)};}));
+  },[commit]);
 
-
-  const deleteLayer=useCallback((id)=>{setLayers(prev=>{const next=prev.filter(l=>l.id!==id);if(activeLayerId===id)setActiveLayerId(next[next.length-1]?.id||null);return next;});},[activeLayerId]);
-  const dupeLayer=useCallback((id)=>{const l=layersRef.current.find(x=>x.id===id);if(!l)return;const nl={...JSON.parse(JSON.stringify({...l,imgEl:undefined})),id:uid(),name:l.name+' copy',imgEl:l.imgEl};setLayers(prev=>[...prev,nl]);setActiveLayerId(nl.id);},[]);
-  const moveLayerUp=useCallback((id)=>{setLayers(prev=>{const i=prev.findIndex(l=>l.id===id);if(i<=0)return prev;const n=[...prev];[n[i-1],n[i]]=[n[i],n[i-1]];return n;});},[]);
-  const moveLayerDown=useCallback((id)=>{setLayers(prev=>{const i=prev.findIndex(l=>l.id===id);if(i>=prev.length-1)return prev;const n=[...prev];[n[i],n[i+1]]=[n[i+1],n[i]];return n;});},[]);
+  // ── Layer ops ─────────────────────────────────────────────────────────────
+  const addSolidLayer=useCallback(()=>{
+    const l={id:uid(),name:'Solid Color',type:'solid',srcUrl:null,imgEl:null,
+      fragments:[],placed:[],grade:{...defaultGrade(),solidColor:'#444444'},
+      visible:true,locked:false,x:0,y:0,w:CW,h:CH,rotation:0};
+    commit(prev=>[...prev,l]);setActiveLayerId(l.id);
+  },[CW,CH,commit]);
+  const deleteLayer=useCallback((id)=>{
+    const next=commit(prev=>prev.filter(l=>l.id!==id));
+    if(activeLayerId===id) setActiveLayerId(next[next.length-1]?.id||null);
+  },[activeLayerId,commit]);
+  const dupeLayer=useCallback((id)=>{
+    const l=layersRef.current.find(x=>x.id===id);if(!l)return;
+    const nl={...l,id:uid(),name:l.name+' copy'};
+    commit(prev=>{const i=prev.findIndex(x=>x.id===id);const n=[...prev];n.splice(i+1,0,nl);return n;});
+    setActiveLayerId(nl.id);
+  },[commit]);
+  const moveLayer=useCallback((id,dir)=>{
+    commit(prev=>{const i=prev.findIndex(l=>l.id===id),j=i+dir;if(i<0||j<0||j>=prev.length)return prev;const n=[...prev];[n[i],n[j]]=[n[j],n[i]];return n;});
+  },[commit]);
+  const moveLayerUp=useCallback((id)=>moveLayer(id,1),[moveLayer]);
+  const moveLayerDown=useCallback((id)=>moveLayer(id,-1),[moveLayer]);
 
   // ── LUT import ────────────────────────────────────────────────────────────
   const importLUT=useCallback((file)=>{
     if(!file||!activeLayer) return;
+    const id=activeLayer.id;
     const reader=new FileReader();
     reader.onload=e=>{
-      const lut=parseCube(e.target.result);
-      updateGrade(activeLayer.id,{lutName:file.name,lutData:lut});
+      try{updateGrade(id,{lutName:file.name,lutData:window.DZ.parseCube(e.target.result)});endGesture();}
+      catch(err){alert(`Could not read ${file.name}: ${err.message}. DASZFRAME supports 3D .cube LUTs.`);}
     };
     reader.readAsText(file);
-  },[activeLayer,updateGrade]);
+  },[activeLayer,updateGrade,endGesture]);
 
-  // ── Save Project (.daszframe) ─────────────────────────────────────────────
+  // ── Sessions: save, open, autosave, restore ───────────────────────────────
+  const snapshot=useCallback(()=>window.DZStore.serialize(
+    {layers:layersRef.current,name:projectName,canvasSizeId,bgColor,layoutMode,activeLayerId},
+    srcDataCache.current),[projectName,canvasSizeId,bgColor,layoutMode,activeLayerId]);
+
+  const applySession=useCallback(async(session)=>{
+    const s=await window.DZStore.deserialize(session);
+    setProjectName(s.name||'Untitled Project');
+    if(s.canvasSizeId) setCanvasSizeId(s.canvasSizeId);
+    if(s.bgColor) setBgColor(s.bgColor);
+    if(s.layoutMode) setLayoutMode(s.layoutMode);
+    setLive(s.layers);resetHistory(s.layers);
+    setActiveLayerId(s.activeLayerId||s.layers[s.layers.length-1]?.id||null);
+    setSelectedFragId(null);
+    if(s.savedAt) setLastSaved(new Date(s.savedAt));
+  },[setLive,resetHistory]);
+
   const saveProject=useCallback((name)=>{
     const pName=name||projectName||'Untitled Project';
     setProjectName(pName);
-    // Serialize layers — imgEl can't be JSON'd. Embed the pixels as a data URL
-    // so the project reloads in a fresh session (blob: URLs die on tab close).
-    const serializableLayers=layers.map(l=>({
-      ...l,
-      imgEl:undefined,
-      srcUrl:undefined,
-      srcData:(l.type==='photo'||l.type==='collage')?imgElToDataURL(l.imgEl):null,
-    }));
-    const session={
-      version:'3.0',
-      name:pName,
-      savedAt:new Date().toISOString(),
-      canvasSizeId,bgColor,layoutMode,aiNote,
-      layers:serializableLayers,
-      activeLayerId,
-    };
+    const session={...snapshot(),name:pName};
     const blob=new Blob([JSON.stringify(session)],{type:'application/json'});
     const a=document.createElement('a');
     a.href=URL.createObjectURL(blob);
     a.download=`${pName.replace(/[^a-zA-Z0-9_\- ]/g,'').trim()||'project'}.daszframe`;
-    a.click();
+    a.click();setTimeout(()=>URL.revokeObjectURL(a.href),10000);
     setLastSaved(new Date());
-    // Track in recents
     const recents=[{name:pName,date:new Date().toISOString()},...recentProjects.filter(r=>r.name!==pName)].slice(0,5);
     setRecentProjects(recents);
     try{localStorage.setItem('daszframe_recent',JSON.stringify(recents));}catch(_){}
-  },[layers,projectName,canvasSizeId,bgColor,layoutMode,aiNote,activeLayerId,recentProjects]);
+  },[projectName,snapshot,recentProjects]);
 
-  // ── Open Project (.daszframe) ─────────────────────────────────────────────
   const openProject=useCallback((file)=>{
     if(!file) return;
     const reader=new FileReader();
     reader.onload=async e=>{
-      try{
-        const session=JSON.parse(e.target.result);
-        setProjectName(session.name||'Untitled Project');
-        if(session.canvasSizeId) setCanvasSizeId(session.canvasSizeId);
-        if(session.bgColor)      setBgColor(session.bgColor);
-        if(session.layoutMode)   setLayoutMode(session.layoutMode);
-        if(session.aiNote)       setAiNote(session.aiNote);
-
-        // Reload images from embedded data URLs (new files) or legacy blob URLs.
-        const restoredLayers=await Promise.all((session.layers||[]).map(async l=>{
-          const src=l.srcData||l.srcUrl;
-          if((l.type==='photo'||l.type==='collage')&&src){
-            try{
-              const img=new Image();
-              await new Promise((res,rej)=>{img.onload=res;img.onerror=rej;img.src=src;});
-              return{...l,imgEl:img,srcUrl:src};
-            }catch(_){return{...l,imgEl:null};}
-          }
-          return l;
-        }));
-        setLayers(restoredLayers);
-        setActiveLayerId(session.activeLayerId||restoredLayers[restoredLayers.length-1]?.id||null);
-        setLastSaved(new Date(session.savedAt));
-      }catch(_){alert('Could not open file — it may be corrupted or from an older version.');}
+      try{setIsProc(true);setProcMsg('Opening project…');await applySession(JSON.parse(e.target.result));setRestoreOffer(null);}
+      catch(_){alert('Could not open file — it may be corrupted or not a .daszframe project.');}
+      finally{setIsProc(false);}
     };
     reader.readAsText(file);
-  },[]);
+  },[applySession]);
 
-  // ── Auto-save to localStorage every 30s ──────────────────────────────────
+  // Offer to restore the last session on start-up.
   useEffect(()=>{
-    if(!layers.length) return;
-    const t=setTimeout(()=>{
-      try{
-        const lite={name:projectName,canvasSizeId,bgColor,layoutMode,
-          layers:layers.map(l=>({...l,imgEl:undefined,
-            // Only save fragment thumbnails (small), not full dataUrls (too large for localStorage)
-            placed:l.placed?.map(f=>({...f,dataUrl:undefined})),
-          }))
-        };
-        localStorage.setItem('daszframe_autosave',JSON.stringify(lite));
-        localStorage.setItem('daszframe_autosave_time',new Date().toISOString());
-      }catch(_){} // quota exceeded is fine
-    },30000);
-    return()=>clearTimeout(t);
-  },[layers,projectName,canvasSizeId,bgColor,layoutMode]);
+    window.DZStore.loadAutosave().then(s=>{if(s&&s.layers&&s.layers.length) setRestoreOffer(s);});
+  },[]);
+  const restoreSession=useCallback(async()=>{
+    const s=restoreOffer;setRestoreOffer(null);if(!s) return;
+    setIsProc(true);setProcMsg('Restoring your last session…');
+    try{await applySession(s);}catch(_){alert('The saved session could not be restored.');}
+    setIsProc(false);
+  },[restoreOffer,applySession]);
+  const dismissRestore=useCallback(()=>{setRestoreOffer(null);window.DZStore.clearAutosave();},[]);
 
-  // ── Still export (PNG / JPG / WebP) ───────────────────────────────────────
-  // quality applies to jpg/webp (0..1). atTimeMs lets you export an animated
-  // frame at the current playhead. Returns a Promise.
-  const doExport=useCallback(async(fmt,scale,customName,quality,atTimeMs)=>{
+  // Autosave to IndexedDB 1.5s after the last change (full photos included).
+  useEffect(()=>{
+    if(!layers.length||restoreOffer) return;
+    const t=setTimeout(()=>{
+      try{window.DZStore.saveAutosave(snapshot()).catch(err=>console.warn('Autosave failed:',err));}
+      catch(err){console.warn('Autosave failed:',err);}
+    },1500);
+    return()=>clearTimeout(t);
+  },[layers,projectName,canvasSizeId,bgColor,layoutMode,restoreOffer,snapshot]);
+
+  // ── Live preview: the same engine as export, drawn to a canvas ─────────────
+  const canvasRef=useRef(null);
+  const draggingRef=useRef(false);
+  const viewRef=useRef({});
+  viewRef.current={CW,CH,bgColor,zoom};
+  const rafRef=useRef(0);
+  const drawPreview=useCallback(()=>{
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current=requestAnimationFrame(()=>{
+      const c=canvasRef.current;if(!c) return;
+      const V=viewRef.current;
+      const pr=(draggingRef.current?1:Math.min(window.devicePixelRatio||1,2))*V.zoom;
+      const w=Math.round(V.CW*pr),hh=Math.round(V.CH*pr);
+      if(c.width!==w||c.height!==hh){c.width=w;c.height=hh;}
+      try{window.DZ.renderComposite(c.getContext('2d'),layersRef.current,{scale:pr,CW:V.CW,CH:V.CH,bgColor:V.bgColor,onPending:drawPreview});}
+      catch(err){console.error('Preview render failed:',err);}
+    });
+  },[]);
+  useEffect(()=>{drawPreview();},[layers,bgColor,CW,CH,zoom,appTab,viewMode,dragState,drawPreview]);
+
+  // Fit the canvas to the available space (never upscales past 100%).
+  const stageWrapRef=useRef(null);
+  useEffect(()=>{
+    const el=stageWrapRef.current;if(!el) return;
+    const fit=()=>{const r=el.getBoundingClientRect();if(!r.width) return;setZoom(clamp(Math.min((r.width-40)/CW,(r.height-40)/CH,1),.15,1));};
+    fit();
+    const ro=new ResizeObserver(fit);ro.observe(el);
+    return()=>ro.disconnect();
+  },[CW,CH,appTab,viewMode,leftOpen,rightOpen]);
+
+  // ── Still export (PNG / JPG) ──────────────────────────────────────────────
+  const doExport=useCallback(async(fmt,scale,customName)=>{
     const baseName=(customName||projectName||'daszframe').replace(/[^a-zA-Z0-9_\- ]/g,'').trim()||'daszframe';
-    const mime=fmt==='jpg'?'image/jpeg':fmt==='webp'?'image/webp':'image/png';
-    const q=quality!=null?quality:0.96;
-    try{
-      const c=document.createElement('canvas');c.width=CW*scale;c.height=CH*scale;
+    const mime=fmt==='jpg'?'image/jpeg':'image/png';
+    const render=async(sc)=>{
+      const c=document.createElement('canvas');c.width=CW*sc;c.height=CH*sc;
       const ctx=c.getContext('2d');
-      await drawComposite(ctx,scale,layers,{CW,CH,bgColor});
-      const url=c.toDataURL(mime,q);
-      if(!url||url==='data:,') throw new Error('Canvas produced no data (the image may be too large for this device).');
-      const a=document.createElement('a');a.href=url;a.download=`${baseName}.${fmt}`;a.click();
-      return true;
-    }catch(err){
-      // Fallback: retry at 1× if a high-res export blew the memory limit
+      if(!ctx) throw new Error('This device could not create a canvas that large.');
+      await window.DZ.preload(window.DZ.layerSources(layersRef.current));
+      window.DZ.renderComposite(ctx,layersRef.current,{scale:sc,CW,CH,bgColor});
+      const blob=await new Promise(res=>c.toBlob(res,mime,.95));
+      if(!blob) throw new Error('The image was too large for this device.');
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`${baseName}.${fmt}`;a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),10000);
+    };
+    setIsProc(true);setProcMsg(`Rendering ${CW*scale}×${CH*scale}…`);await tick();
+    try{await render(scale);return true;}
+    catch(err){
       if(scale>1){
-        try{
-          const c=document.createElement('canvas');c.width=CW;c.height=CH;
-          const ctx=c.getContext('2d');
-          await drawComposite(ctx,1,layers,{CW,CH,bgColor});
-          const a=document.createElement('a');a.href=c.toDataURL(mime,q);
-          a.download=`${baseName}.${fmt}`;a.click();
-          alert(`Export at ${scale}× ran out of memory, so it was saved at 1× instead.`);
-          return true;
-        }catch(e2){}
+        try{await render(1);alert(`Export at ${scale}× ran out of memory, so it was saved at 1× instead.`);return true;}catch(_){}
       }
       alert('Export failed: '+(err&&err.message?err.message:'unknown error'));
       return false;
-    }
-  },[layers,bgColor,CW,CH,projectName]);
+    }finally{setIsProc(false);}
+  },[bgColor,CW,CH,projectName]);
 
-  // ── Video export (WebM / GIF) ──────────────────────────────────────────────
-
-  // ── Save grade as JSON ─────────────────────────────────────────────────────
+  // ── Save / load grade as JSON ─────────────────────────────────────────────
   const saveGrade=useCallback(()=>{
     if(!activeLayer) return;
     const a=document.createElement('a');
@@ -1463,14 +1255,17 @@ function App(){
 
   const loadGrade=useCallback((file)=>{
     if(!file||!activeLayer) return;
+    const id=activeLayer.id;
     const reader=new FileReader();
-    reader.onload=e=>{try{updateGrade(activeLayer.id,JSON.parse(e.target.result));}catch(_){}};
+    reader.onload=e=>{try{updateGrade(id,JSON.parse(e.target.result));endGesture();}catch(_){alert('That file is not a DASZFRAME grade.');}};
     reader.readAsText(file);
-  },[activeLayer,updateGrade]);
+  },[activeLayer,updateGrade,endGesture]);
 
   // ── Variations ────────────────────────────────────────────────────────────
   const genVariations=useCallback(()=>{
-    if(!activeLayer||activeLayer.type!=='collage'||!activeLayer.fragments.length) return;
+    if(!activeLayer||activeLayer.type!=='collage'||!activeLayer.fragments.length){
+      setStatusNote('Variations work on a collage layer. Add or select one first.');return;
+    }
     const modes=['dasz','mosaic','editorial','cubist','symmetry','gallery','experimental'];
     setVariations(modes.map(m=>({mode:m,frags:composeLayout(activeLayer.fragments,m,CW,CH)})));
     setShowVars(true);
@@ -1480,16 +1275,6 @@ function App(){
   const selFrag=activeLayer?.placed.find(f=>f.id===selectedFragId);
 
   // ── RENDER ────────────────────────────────────────────────────────────────
-
-  // Slider component
-  const Slider=({label,val,min,max,step=1,onChange,onCommit})=>
-    h('div',{className:'srow'},
-      h('span',{className:'srow-label'},label),
-      h('input',{type:'range',min,max,step,value:val,
-        onChange:e=>onChange(+e.target.value),
-        onMouseUp:onCommit,onTouchEnd:onCommit}),
-      h('span',{className:'srow-val'},val>0?`+${val}`:val)
-    );
 
   // Left panel — tools + layers
   function LeftPanel(){
@@ -1509,12 +1294,7 @@ function App(){
             h('button',{className:'btn sm full',onClick:()=>{fileInputRef.current.dataset.collage='1';fileInputRef.current.click();}},
               h('span',{style:{fontSize:14}},'◈'),' Add Collage Layer'),
             h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:3}},
-              h('button',{className:'btn sm',onClick:()=>{
-                const l={id:uid(),name:'Solid Color',type:'solid',srcUrl:null,imgEl:null,
-                  fragments:[],placed:[],grade:{...defaultGrade(),blendMode:'normal',opacity:100},
-                  visible:true,locked:false,x:0,y:0,w:CW,h:CH};
-                setLayers(prev=>[...prev,l]);setActiveLayerId(l.id);
-              }},'+ Solid'),
+              h('button',{className:'btn sm',onClick:addSolidLayer},'+ Solid'),
               h('button',{className:'btn sm',onClick:()=>genVariations()},'⊞ Vars')
             )
           ),
@@ -1559,11 +1339,11 @@ function App(){
 
         // Quick AI styles
         h('div',{className:'sec'},
-          h('div',{className:'slabel'},'AI Quick Styles'),
+          h('div',{className:'slabel'},'Style Presets'),
           h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:3}},
-            AI_QUICK.map(q=>h('button',{key:q.id,className:'btn sm',
+            STYLE_PRESETS.map(q=>h('button',{key:q.id,className:'btn sm',
               style:{justifyContent:'flex-start',fontSize:10,gap:4},
-              onClick:()=>applyQuick(q)},
+              title:`${FILM_LOOKS.find(l=>l.id===q.look)?.name} look`+' + '+q.layout+' layout',onClick:()=>applyPreset(q)},
               h('span',null,q.icon),q.label))
           )
         ),
@@ -1572,20 +1352,21 @@ function App(){
         activeLayer?.type==='collage'&&h('div',{className:'sec'},
           h('div',{className:'slabel'},'Collage Layout'),
           h('div',{className:`dchip${layoutMode==='dasz'?' on':''}`,
-            onClick:()=>{setLayoutMode('dasz');setTimeout(recompose,0);}},
+            onClick:()=>chooseLayout('dasz')},
             h('span',{style:{fontSize:13}},'◉'),h('span',null,'DASZ'),h('span',{className:'dchip-sub'},'Signature')
           ),
           h('div',{className:'cgrid3',style:{marginTop:3}},
             LAYOUT_MODES.filter(m=>!m.sig).map(m=>h('div',{key:m.id,
               className:`chip${layoutMode===m.id?' on':''}`,
-              onClick:()=>{setLayoutMode(m.id);setTimeout(recompose,0);}},
+              onClick:()=>chooseLayout(m.id)},
               m.icon,' ',m.label))
           ),
-          h('button',{className:'btn sm full',style:{marginTop:4},onClick:recompose},'↻ Recompose')
+          h('button',{className:'btn sm full',style:{marginTop:4},onClick:()=>recompose()},'↻ Recompose')
         ),
 
         // AI note
-        aiNote&&h('div',{className:'sec'},h('div',{className:'ai-card'},h('div',{className:'ai-badge'},'AI'),h('div',{className:'ai-text'},aiNote))),
+        statusNote&&h('div',{className:'sec'},h('div',{className:'ai-card'},h('div',{className:'ai-badge'},'NOTE'),h('div',{className:'ai-text'},statusNote),
+          h('button',{className:'btn ico ghost',title:'Dismiss',onClick:()=>setStatusNote(''),style:{marginLeft:'auto',alignSelf:'flex-start'}},'✕'))),
 
         // Canvas
         h('div',{className:'sec'},
@@ -1943,87 +1724,50 @@ function App(){
     );
   }
 
-  // Canvas stage
+  // Canvas stage: the engine draws everything into one <canvas>; transparent
+  // hit-boxes on top handle selecting and dragging.
   function Stage(){
-    const visLayers=[...layers].filter(l=>l.visible!==false);
-    return h('div',{
-      className:'stage',
-      ref:overlayRef,
-      style:{width:CW,height:CH,background:bgColor,position:'relative',overflow:'hidden'},
-      onMouseMove,onMouseUp,onMouseLeave:onMouseUp,
-      onClick:e=>{if(e.target===overlayRef.current){setSelectedFragId(null);}},
-    },
-      // Render each visible layer
-      visLayers.map((l)=>{
-        const g=l.grade||defaultGrade();
-        const layerFilter=gradeToFilter(g);
-        const lookFilter=g.look&&g.look!=='none'?lookToFilter(g.look):'none';
-        const combinedFilter=[layerFilter,lookFilter!=='none'?lookFilter:''].filter(Boolean).join(' ')||'none';
-        const isActive=l.id===activeLayerId;
+    const sel=selectedFragId;
+    return h('div',{className:'stage-fit',style:{width:CW*zoom,height:CH*zoom}},
+      h('div',{
+        className:'stage',
+        ref:overlayRef,
+        style:{width:CW,height:CH,position:'relative',overflow:'hidden',transform:`scale(${zoom})`,transformOrigin:'0 0'},
+        onPointerDown:e=>{if(e.target===overlayRef.current||e.target===canvasRef.current){setSelectedFragId(null);}},
+      },
+        h('canvas',{ref:canvasRef,className:'stage-canvas',style:{position:'absolute',left:0,top:0,width:CW,height:CH}}),
+        layers.filter(l=>l.visible!==false).map(l=>{
+          const isActive=l.id===activeLayerId;
+          if(l.type==='collage'){
+            const frags=[...l.placed].filter(f=>f.visible!==false).sort((a,b)=>(a.zIndex||0)-(b.zIndex||0));
+            return h('div',{key:l.id,className:'hit-layer'},
+              frags.map(f=>h('div',{key:f.id,
+                className:`hit frag-hit${sel===f.id?' sel':''}${isActive?' in-active':''}`,
+                title:f.label,
+                style:{left:f.x,top:f.y,width:f.w,height:f.h,
+                  transform:`rotate(${f.rotation||0}deg)`,
+                  borderRadius:f.borderRadius>0?`${f.borderRadius}px`:undefined},
+                onPointerDown:e=>onFragPointerDown(e,f.id,l.id)}))
+            );
+          }
+          return h('div',{key:l.id,className:`hit layer-hit${isActive?' sel':''}`,
+            style:{left:l.x||0,top:l.y||0,width:l.w||CW,height:l.h||CH,transform:l.rotation?`rotate(${l.rotation}deg)`:undefined},
+            onPointerDown:e=>{e.stopPropagation();setActiveLayerId(l.id);setSelectedFragId(null);}});
+        }),
 
-        if(l.type==='photo'&&l.imgEl){
-          return h('div',{key:l.id,
-            style:{
-              position:'absolute',left:l.x||0,top:l.y||0,
-              width:l.w||CW,height:l.h||CH,
-              transform:l.rotation?`rotate(${l.rotation}deg)`:'none',
-              filter:combinedFilter,
-              opacity:(g.opacity??100)/100,
-              mixBlendMode:g.blendMode||'normal',
-              outline:isActive?'1.5px solid rgba(232,213,163,0.4)':undefined,
-              cursor:'default',
-              zIndex:layers.indexOf(l),
-            },
-            onClick:()=>setActiveLayerId(l.id)},
-            h('img',{src:l.srcUrl,style:{width:'100%',height:'100%',objectFit:'cover',display:'block',pointerEvents:'none'}})
-          );
-        } else if(l.type==='collage'){
-          const cam=null; // cam3d/animation removed
-          const sorted=[...l.placed].filter(f=>f.visible!==false).sort((a,b)=>(a.zIndex||0)-(b.zIndex||0));
-          return h('div',{key:l.id,
-            style:{position:'absolute',inset:0,
-              filter:combinedFilter,opacity:(g.opacity??100)/100,
-              mixBlendMode:g.blendMode||'normal',
-              outline:isActive?'1.5px solid rgba(232,213,163,0.25)':undefined,
-              zIndex:layers.indexOf(l),
-            },
-            onClick:()=>setActiveLayerId(l.id)},
-            sorted.map(f=>{
-              let rf=f;
-              const zi=cam?Math.round(1000-((f.depth==null?cam.focus:f.depth)*10)):(f.zIndex||0);
-              return h('div',{key:f.id,
-              className:`frag-item${selectedFragId===f.id?' sel':''}`,
-              style:{
-                position:'absolute',left:rf.x,top:rf.y,width:rf.w,height:rf.h,
-                transform:`rotate(${rf.rotation||0}deg)${f.flipped?' scaleX(-1)':''}`,
-                transformOrigin:'center center',opacity:rf.opacity??1,
-                zIndex:zi,
-                borderRadius:f.borderRadius>0?`${f.borderRadius}px`:undefined,
-                overflow:f.borderRadius>0?'hidden':undefined,
-                boxShadow:f.borderStyle==='shadow'?'4px 6px 16px rgba(0,0,0,.4)':f.borderStyle==='glow'?'0 0 18px rgba(232,213,163,.5)':undefined,
-                outline:(f.keyframes&&f.keyframes.length)?'1px dashed rgba(232,213,163,.35)':undefined,
-              },
-              onMouseDown:e=>onFragMouseDown(e,f.id,l.id)},
-              h('img',{src:f.dataUrl,draggable:false})
-            );})
-          );
-        } else if(l.type==='solid'){
-          return h('div',{key:l.id,style:{position:'absolute',left:l.x||0,top:l.y||0,width:l.w||CW,height:l.h||CH,background:g.solidColor||'#444',opacity:(g.opacity??100)/100,mixBlendMode:g.blendMode||'normal',zIndex:layers.indexOf(l),cursor:'default',outline:isActive?'1.5px solid rgba(232,213,163,0.4)':undefined},onClick:()=>setActiveLayerId(l.id)});
-        }
-        return null;
-      }),
+        isProc&&h('div',{className:'lo'},h('div',{className:'lo-msg'},procMsg),h('div',{className:'lo-bar'},h('div',{className:'lo-fill'}))),
 
-      isProc&&h('div',{className:'lo'},h('div',{className:'lo-msg'},procMsg),h('div',{className:'lo-bar'},h('div',{className:'lo-fill'}))),
-
-      layers.length===0&&!isProc&&h('div',{className:'empty'},
-        h('div',{className:'empty-logo'},'DASZFRAME'),
-        h('div',{className:'empty-sub'},'Add a photo layer to begin.\nStack multiple photos · grade each independently\nApply film looks · collage layouts · export.'),
-        h('button',{className:'btn pri',style:{marginTop:14},onClick:()=>fileInputRef.current?.click()},'Add First Photo →')
+        layers.length===0&&!isProc&&h('div',{className:'empty'},
+          h('div',{className:'empty-logo'},'DASZFRAME'),
+          h('div',{className:'empty-sub'},'Turn a portrait into a fragmented collage, or grade photos like film.\nEverything runs in your browser. Your photos never leave your device.'),
+          h('div',{style:{display:'flex',gap:8,marginTop:14,flexWrap:'wrap',justifyContent:'center'}},
+            h('button',{className:'btn pri',onClick:()=>{fileInputRef.current.dataset.collage='1';fileInputRef.current.click();}},'◈ Make a Face Collage'),
+            h('button',{className:'btn',onClick:()=>fileInputRef.current?.click()},'🖼 Add a Photo')
+          )
+        )
       )
     );
   }
-
-
 
   function ExportModal(){
     const [fname,setFname]=useState(exportFilename||projectName||'daszframe');
@@ -2040,7 +1784,7 @@ function App(){
             h('div',{style:{display:'flex',alignItems:'center',gap:6}},
               h('input',{type:'text',value:fname,
                 onChange:e=>setFname(e.target.value),
-                onKeyDown:e=>{if(e.key==='Enter'){doExport('png',1,fname);setShowExport(false);}},
+                onKeyDown:e=>{if(e.key==='Enter'){setShowExport(false);doExport('png',2,fname);}},
                 placeholder:'my-portrait',
                 style:{flex:1,background:'var(--s3)',border:'1px solid var(--b2)',color:'var(--text)',
                   fontFamily:'var(--fb)',fontSize:13,padding:'5px 8px',borderRadius:3,outline:'none'}}),
@@ -2051,15 +1795,15 @@ function App(){
         h('div',{style:{fontSize:11,color:'var(--text2)',marginBottom:8}},
           'Format & Resolution'),
         h('div',{style:{display:'flex',flexDirection:'column',gap:5}},
-          [['png',1,`PNG — Standard (${CW}×${CH})`,'↓'],
-           ['png',2,`PNG — HD (${CW*2}×${CH*2})`,'↓'],
-           ['png',4,`PNG — 4K (${CW*4}×${CH*4})`,'↓'],
-           ['jpg',1,'JPG — Standard','↓'],
-           ['jpg',2,'JPG — HD','↓'],
+          [['png',1,`PNG — Standard · ${CW}×${CH}`,'↓'],
+           ['png',2,`PNG — HD · ${CW*2}×${CH*2}`,'↓'],
+           ['png',4,`PNG — Print · ${CW*4}×${CH*4}`,'↓'],
+           ['jpg',2,`JPG — HD · ${CW*2}×${CH*2}`,'↓'],
+           ['jpg',4,`JPG — Print · ${CW*4}×${CH*4}`,'↓'],
           ].map(([fmt,sc,label,icon])=>
             h('button',{key:`${fmt}${sc}`,className:'btn',
               style:{justifyContent:'space-between'},
-              onClick:()=>{doExport(fmt,sc,fname||projectName);setShowExport(false);}},
+              onClick:()=>{setShowExport(false);doExport(fmt,sc,fname||projectName);}},
               h('span',null,label),
               h('span',{style:{color:'var(--muted)',fontSize:11}},`${icon} ${fname||'daszframe'}.${fmt}`)
             )
@@ -2137,7 +1881,7 @@ function App(){
   }
 
 
-  const canUndo=histIdx>0,canRedo=histIdx<history.length-1;
+  const canUndo=hist.current.idx>0,canRedo=hist.current.idx<hist.current.stack.length-1;
   const selFragLayer=layers.find(l=>l.placed?.some(f=>f.id===selectedFragId));
 
   // Main render
@@ -2177,14 +1921,13 @@ function App(){
               h('span',{style:{fontSize:10,color:'var(--muted)'}},lastSaved?`· saved ${lastSaved.toLocaleTimeString()}`:layers.length?'· unsaved':''),
               h('span',{style:{fontSize:10,color:'var(--muted)',marginLeft:2}},'✏')
             ),
-        h('div',{className:'vsw',style:{marginLeft:8}},
+        appTab==='studio'&&h('div',{className:'vsw',style:{marginLeft:8}},
           h('button',{className:`vbtn${viewMode==='split'?' on':''}`,onClick:()=>setViewMode('split')},'Split'),
           h('button',{className:`vbtn${viewMode==='canvas'?' on':''}`,onClick:()=>setViewMode('canvas')},'Canvas'),
-          h('button',{className:`vbtn${viewMode==='full'?' on':''}`,onClick:()=>setViewMode('full')},'Full')
-        )
+                  )
       ),
 
-      h('div',{className:'hdr-right'},
+      appTab==='studio'&&h('div',{className:'hdr-right'},
         // Save / Open
         h('button',{className:'btn xs ghost',title:'Open project (.daszframe)',
           onClick:()=>openProjRef.current?.click()},'↑ Open'),
@@ -2195,12 +1938,8 @@ function App(){
           layers.length?'↓ Save':'↓ Save'),
         h('div',{style:{width:1,height:14,background:'var(--b1)',margin:'0 2px'}}),
         // Undo/Redo
-        h('button',{className:'btn xs ghost',disabled:!canUndo,title:'Undo (Ctrl+Z)',
-          onClick:()=>{if(histIdx>0){skipHist.current=true;setLayers(history[histIdx-1].map(l=>({...l})));setHistIdx(p=>p-1);setTimeout(()=>{skipHist.current=false;},0);}}},
-          '↩'),
-        h('button',{className:'btn xs ghost',disabled:!canRedo,title:'Redo (Ctrl+Y)',
-          onClick:()=>{if(histIdx<history.length-1){skipHist.current=true;setLayers(history[histIdx+1].map(l=>({...l})));setHistIdx(p=>p+1);setTimeout(()=>{skipHist.current=false;},0);}}},
-          '↪'),
+        h('button',{className:'btn xs ghost',disabled:!canUndo,title:'Undo (Ctrl+Z)',onClick:undo},'↩'),
+        h('button',{className:'btn xs ghost',disabled:!canRedo,title:'Redo (Ctrl+Y)',onClick:redo},'↪'),
         h('div',{style:{width:1,height:14,background:'var(--b1)',margin:'0 2px'}}),
         h('button',{className:`btn xs ghost${snapGrid?' act':''}`,onClick:()=>setSnapGrid(v=>!v),title:'Snap to grid'},'⊞'),
         layers.length>0&&h(Fragment,null,
@@ -2211,47 +1950,48 @@ function App(){
       )
     ),
 
+    restoreOffer&&h('div',{className:'restore-bar'},
+      h('span',null,`Restore your last session${restoreOffer.name?` "${restoreOffer.name}"`:''}${restoreOffer.savedAt?` from ${new Date(restoreOffer.savedAt).toLocaleString()}`:''}?`),
+      h('button',{className:'btn xs pri',onClick:restoreSession},'Restore'),
+      h('button',{className:'btn xs ghost',onClick:dismissRestore},'Start fresh')
+    ),
+
     appTab==='spotlight'&&h(SpotlightEditor),
     appTab==='studio'&&h('div',{className:'body'},
-      viewMode!=='canvas'&&h(LeftPanel),
+      viewMode!=='canvas'&&LeftPanel(),
 
-      h('main',{className:'canvas-area',style:{display:viewMode==='full'?'none':'flex'}},
+      h('main',{className:'canvas-area'},
         h('div',{className:'toolbar'},
           h('span',{className:'tlabel'},activeLayer?`Active: ${activeLayer.name}`:'Canvas'),
           h('div',{className:'tsep'}),
-          h('button',{className:`btn xs ghost${leftOpen?' act':''}`,onClick:()=>setLeftOpen(o=>!o)},'◧'),
-          h('button',{className:`btn xs ghost${rightOpen?' act':''}`,onClick:()=>setRightOpen(o=>!o)},'◨'),
+          h('button',{className:`btn xs ghost${leftOpen?' act':''}`,title:'Toggle left panel',onClick:()=>setLeftOpen(o=>!o)},'◧'),
+          h('button',{className:`btn xs ghost${rightOpen?' act':''}`,title:'Toggle right panel',onClick:()=>setRightOpen(o=>!o)},'◨'),
           h('div',{className:'tsep'}),
           selFrag&&selFragLayer&&h(Fragment,null,
-            h('button',{className:'btn xs ghost',onClick:()=>bringFwd(selFragLayer.id,selectedFragId)},'↑'),
-            h('button',{className:'btn xs ghost',onClick:()=>sendBck(selFragLayer.id,selectedFragId)},'↓'),
-            h('button',{className:'btn xs ghost',onClick:()=>dupFrag(selFragLayer.id,selFrag)},'⊕'),
-            h('button',{className:'btn xs ghost red',onClick:()=>deleteFrag(selFragLayer.id,selectedFragId)},'✕'),
+            h('button',{className:'btn xs ghost',title:'Bring forward',onClick:()=>bringFwd(selFragLayer.id,selectedFragId)},'↑'),
+            h('button',{className:'btn xs ghost',title:'Send back',onClick:()=>sendBck(selFragLayer.id,selectedFragId)},'↓'),
+            h('button',{className:'btn xs ghost',title:'Duplicate',onClick:()=>dupFrag(selFragLayer.id,selFrag)},'⊕'),
+            h('button',{className:'btn xs ghost red',title:'Delete (Del)',onClick:()=>deleteFrag(selFragLayer.id,selectedFragId)},'✕'),
             h('div',{className:'tsep'}),
             h('span',{className:'tlabel',style:{color:'var(--acc)'}},selFrag.label),
             h('div',{className:'tsep'}),
           ),
           h('div',{style:{flex:1}}),
-          h('span',{className:'tlabel'},`${CW}×${CH} · ${layers.length} layers`)
+          h('span',{className:'tlabel'},`${CW}×${CH} · ${Math.round(zoom*100)}% · ${layers.length} layers`)
         ),
-        h('div',{className:'stage-wrap'},h(Stage)),
+        h('div',{className:'stage-wrap',ref:stageWrapRef},Stage()),
         h('div',{className:'sbar'},
           h('div',{className:`sdot${isProc?' pulse warn':''}`}),
           h('span',null,isProc?procMsg:`${layers.filter(l=>l.visible).length} visible · ${layers.filter(l=>l.type==='collage').length} collage`),
           activeLayer&&h(Fragment,null,h('span',null,'·'),h('span',{style:{color:'var(--acc)'}},activeLayer.name,` · ${activeLayer.grade?.look||'none'}`)),
           h('div',{style:{flex:1}}),
-          canUndo&&h('span',null,`↩${histIdx}`)
+          canUndo&&h('span',null,`↩${hist.current.idx}`)
         )
       ),
 
-      viewMode==='full'&&h('div',{style:{flex:1,display:'flex',overflow:'hidden'}},
-        h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',padding:20,background:'repeating-conic-gradient(#111 0% 25%,#0d0d0d 0% 50%) 0 0/20px 20px'}},h(Stage)),
-        h('div',{style:{width:280,borderLeft:'1px solid var(--b1)',overflow:'hidden',display:'flex',flexDirection:'column',background:'var(--s1)'}},h(RightPanel))
-      ),
-
-      viewMode!=='canvas'&&h(RightPanel)
+      viewMode!=='canvas'&&RightPanel()
     ),
-    appTab==='studio'&&h(Fragment,null,h(ExportModal),h(VarsModal),h(SaveAsModal))
+    appTab==='studio'&&h(Fragment,null,h(ExportModal),VarsModal(),h(SaveAsModal))
   );
 }
 
