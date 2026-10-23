@@ -47,7 +47,6 @@ Badges can be moved, resized and labelled, then exported as PNG.
 | `docs/js/store.js` | Project files and autosave (IndexedDB). |
 | `docs/vendor/face-api/` | [face-api](https://github.com/vladmandic/face-api) (MIT) and its two models (~2 MB, loaded only when you make a collage). |
 | `extension/` | Chrome extension shell (manifest, background script, icons) and its build script. |
-| `archive/` | Earlier versions (v1.1, v3), kept for reference. |
 
 ## Run it locally
 
