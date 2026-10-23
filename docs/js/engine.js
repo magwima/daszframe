@@ -324,11 +324,20 @@
   // Draw an image into a box, cropping (never stretching) to fill it.
   function drawCover(ctx, im, x, y, w, h) {
     const iw = im.naturalWidth || im.width, ih = im.naturalHeight || im.height;
-    if (!iw || !ih || !w || !h) return;
-    const ba = w / h, ia = iw / ih;
-    let sx = 0, sy = 0, sw = iw, sh = ih;
-    if (ia > ba) { sw = ih * ba; sx = (iw - sw) / 2; } else { sh = iw / ba; sy = (ih - sh) / 2; }
-    ctx.drawImage(im, sx, sy, sw, sh, x, y, w, h);
+    drawCoverRect(ctx, im, 0, 0, iw, ih, x, y, w, h);
+  }
+  // Same, but from a source rectangle of `src`.
+  function drawCoverRect(ctx, src, sx, sy, sw, sh, x, y, w, h) {
+    if (!sw || !sh || !w || !h) return;
+    const ba = w / h, ia = sw / sh;
+    if (ia > ba) { const nw = sh * ba; sx += (sw - nw) / 2; sw = nw; } else { const nh = sw / ba; sy += (sh - nh) / 2; sh = nh; }
+    ctx.drawImage(src, sx, sy, sw, sh, x, y, w, h);
+  }
+  // Retouched source photo for a layer (portrait.js), or null.
+  function portraitSource(l, o) {
+    const P = global.DZPortrait, g = l.grade || {};
+    if (!P || !l.imgEl || !l.face || !l.face.points || !P.active(g.portrait)) return null;
+    return P.get(l.imgEl, l.face.points, g.portrait, o.hq ? 6000 : 2400);
   }
   function drawContent(lc, l, o) {
     const { scale, CW, CH, onPending } = o, x = lc.getContext('2d'), g = l.grade || {};
@@ -336,14 +345,15 @@
     if (l.type === 'photo' && l.imgEl) {
       const X = l.x || 0, Y = l.y || 0, w = l.w || CW, h = l.h || CH;
       x.translate(X + w / 2, Y + h / 2); x.rotate((l.rotation || 0) * Math.PI / 180);
-      x.drawImage(l.imgEl, -w / 2, -h / 2, w, h);
+      x.drawImage(portraitSource(l, o) || l.imgEl, -w / 2, -h / 2, w, h);
     } else if (l.type === 'solid') {
       x.fillStyle = g.solidColor || '#444'; x.fillRect(l.x || 0, l.y || 0, l.w || CW, l.h || CH);
     } else if (l.type === 'collage') {
       const frags = (l.placed || []).filter(f => f.visible !== false).sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
+      const ps = portraitSource(l, o); // retouched source: fragments are re-cut from it
       for (const f of frags) {
-        const im = img(f.dataUrl, onPending);
-        if (!im) continue;
+        const im = (ps && f.area) ? null : img(f.dataUrl, onPending);
+        if (!im && !(ps && f.area)) continue;
         x.save(); x.globalAlpha = f.opacity ?? 1;
         x.translate(f.x + f.w / 2, f.y + f.h / 2); x.rotate((f.rotation || 0) * Math.PI / 180);
         if (f.flipped) x.scale(-1, 1);
@@ -353,7 +363,8 @@
           x.beginPath(); x.roundRect(-f.w / 2, -f.h / 2, f.w, f.h, f.borderRadius); x.fillStyle = '#000'; x.fill();
           x.shadowColor = 'transparent'; x.clip();
         }
-        drawCover(x, im, -f.w / 2, -f.h / 2, f.w, f.h);
+        if (im) drawCover(x, im, -f.w / 2, -f.h / 2, f.w, f.h);
+        else drawCoverRect(x, ps, f.area.x * ps.width, f.area.y * ps.height, f.area.w * ps.width, f.area.h * ps.height, -f.w / 2, -f.h / 2, f.w, f.h);
         x.restore();
       }
     }
@@ -416,5 +427,5 @@
     return { size, data: data.slice(0, size * size * size) };
   }
 
-  global.DZ = { img, preload, layerSources, renderComposite, renderLayer, drawCover, parseCube, needsColor, LOOKS };
+  global.DZ = { img, preload, layerSources, renderComposite, renderLayer, drawCover, blurredCopy, parseCube, needsColor, LOOKS };
 })(window);

@@ -86,6 +86,8 @@ const defaultGrade=()=>({
   curvePoints:[[0,0],[64,64],[128,128],[192,192],[255,255]],
   // LUT
   lutName:null, lutData:null,
+  // Portrait retouch (0–100 each), guided by face landmarks — see js/portrait.js
+  portrait:{light:0,eyes:0,skin:0,teeth:0},
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -108,7 +110,7 @@ function extractRegion(imgEl,area){
     x.drawImage(imgEl,sx,sy,sw,sh,0,0,c.width,c.height);
     return c.toDataURL('image/jpeg',.92);
   };
-  return{dataUrl:cut(FRAG_MAX),thumb:cut(THUMB_MAX),ar:sw/sh};
+  return{dataUrl:cut(FRAG_MAX),thumb:cut(THUMB_MAX),ar:sw/sh,area:{...area}};
 }
 
 // Fit a box of aspect `ar` inside a `size`×`size` square (or w×h box).
@@ -962,7 +964,7 @@ function App(){
     }
     const name=file.name.replace(/\.[^.]+$/,'').slice(0,24);
 
-    let frags=[],placed=[],note='';
+    let frags=[],placed=[],note='',face;
     if(asCollage){
       let regions=FACE_REGIONS;
       setProcMsg('Finding the face…');await tick();
@@ -970,8 +972,9 @@ function App(){
         const found=await window.DZFaces.detect(img);
         if(found){
           regions=window.DZFaces.regionsFromLandmarks(found.points,img.naturalWidth,img.naturalHeight);
+          face={points:found.points};
           note=found.faces>1?`Found ${found.faces} faces, so the largest one was used.`:'Face found. Fragments follow the eyes, nose and mouth.';
-        } else note='No face found, so standard portrait crops were used. A clear, front-facing face works best.';
+        } else {face=null;note='No face found, so standard portrait crops were used. A clear, front-facing face works best.';}
       }catch(err){
         console.warn('Face detection unavailable:',err);
         note='Face detection could not load, so standard portrait crops were used.';
@@ -992,7 +995,7 @@ function App(){
       srcUrl:url,imgEl:img,
       fragments:frags,placed,
       x:(CW-w)/2,y:(CH-hh)/2,w,h:hh,rotation:0,
-      grade:defaultGrade(),
+      grade:defaultGrade(),face,
       visible:true,locked:false,
     };
     commit(prev=>[...prev,newLayer]);
@@ -1228,7 +1231,7 @@ function App(){
       const ctx=c.getContext('2d');
       if(!ctx) throw new Error('This device could not create a canvas that large.');
       await window.DZ.preload(window.DZ.layerSources(layersRef.current));
-      window.DZ.renderComposite(ctx,layersRef.current,{scale:sc,CW,CH,bgColor});
+      window.DZ.renderComposite(ctx,layersRef.current,{scale:sc,CW,CH,bgColor,hq:true});
       const blob=await new Promise(res=>c.toBlob(res,mime,.95));
       if(!blob) throw new Error('The image was too large for this device.');
       const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`${baseName}.${fmt}`;a.click();
@@ -1270,6 +1273,25 @@ function App(){
     setVariations(modes.map(m=>({mode:m,frags:composeLayout(activeLayer.fragments,m,CW,CH)})));
     setShowVars(true);
   },[activeLayer,CW,CH]);
+
+  // Detect the face for the Portrait tab the first time it is opened on a
+  // layer (collage layers already have it from when they were made).
+  const detectingRef=useRef(new Set());
+  useEffect(()=>{
+    const l=activeLayer;
+    if(rtab!=='portrait'||!l||l.type==='solid'||l.face!==undefined||!l.imgEl||detectingRef.current.has(l.id)) return;
+    detectingRef.current.add(l.id);
+    window.DZFaces.detect(l.imgEl)
+      .then(f=>f?{points:f.points}:null)
+      .catch(err=>{console.warn('Face detection unavailable:',err);return null;})
+      .then(face=>{
+        // Attach to the layer everywhere it appears (current state and undo history).
+        const tag=(ls)=>ls.map(x=>x.imgEl===l.imgEl&&x.face===undefined?{...x,face}:x);
+        hist.current.stack=hist.current.stack.map(tag);
+        setLive(tag);
+        detectingRef.current.delete(l.id);
+      });
+  },[rtab,activeLayer,setLive]);
 
   // Currently selected fragment (in active layer)
   const selFrag=activeLayer?.placed.find(f=>f.id===selectedFragId);
@@ -1404,6 +1426,7 @@ function App(){
           h('div',{className:`tab${rtab==='looks'?' on':''}`,onClick:()=>setRtab('looks')},'Looks'),
           h('div',{className:`tab${rtab==='grade'?' on':''}`,onClick:()=>setRtab('grade')},'Grade'),
           h('div',{className:`tab${rtab==='fx'?' on':''}`,onClick:()=>setRtab('fx')},'FX'),
+          h('div',{className:`tab${rtab==='portrait'?' on':''}`,onClick:()=>setRtab('portrait')},'Portrait'),
           h('div',{className:`tab${rtab==='frag'?' on':''}`,onClick:()=>setRtab('frag')},'Layer'),
         ),
 
@@ -1635,6 +1658,34 @@ function App(){
               h('button',{className:'btn sm full',onClick:()=>fileInputRef.current?.click()},'Replace Background Photo')
             )
           )
+        ),
+
+        // ── PORTRAIT TAB ──────────────────────────────────────────────────
+        rtab==='portrait'&&activeLayer&&h('div',{className:'sec'},
+          activeLayer.type==='solid'
+            ?h('div',{className:'hint'},'Portrait tools work on photo and collage layers.')
+            :h('div',{className:'node-graph'},
+              h('div',{className:'node-title'},'◈ Portrait'),
+              activeLayer.face===undefined&&h('div',{className:'hint'},'Finding the face…'),
+              activeLayer.face===null&&h('div',{className:'hint'},'No face was found in this layer, so portrait tools are unavailable. A clear, front-facing face works best.'),
+              activeLayer.face&&activeLayer.type==='collage'&&activeLayer.placed.some(f=>!f.area)&&
+                h('div',{className:'hint'},'This collage was made with an older version. Recreate it to retouch its fragments.'),
+              activeLayer.face&&h(Fragment,null,
+                [['Face Light','light'],['Eye Enhancer','eyes'],['Skin Smoothing','skin'],['Teeth Whitening','teeth']].map(([label,key])=>{
+                  const p=g.portrait||{},val=p[key]||0;
+                  return h('div',{key,className:'srow wide'},
+                    h('span',{className:'srow-label'},label),
+                    h('input',{type:'range',min:0,max:100,step:1,value:val,
+                      onChange:e=>updateGrade(gid,{portrait:{...(g.portrait||{}),[key]:+e.target.value}}),
+                      onMouseUp:commitGrade,onTouchEnd:commitGrade}),
+                    h('span',{className:'srow-val'},val));
+                }),
+                h('button',{className:'btn sm full',style:{marginTop:6},
+                  onClick:()=>{updateGrade(gid,{portrait:{light:0,eyes:0,skin:0,teeth:0}});endGesture();}},'Reset Portrait'),
+                h('div',{className:'hint',style:{marginTop:8}},
+                  activeLayer.type==='collage'?'Retouches the original photo, so every fragment updates.':'Retouches are guided by the face, so only skin, eyes and teeth are touched.')
+              )
+            )
         ),
 
         // ── LAYER / FRAGMENT TAB ──────────────────────────────────────────
